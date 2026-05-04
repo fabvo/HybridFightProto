@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- NFC for the focus mechanic -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
+
+    <!-- TCP networking between the two phones -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application>
+        <!--
+          The theme and the meta-data android.app.lib_name="game" are the GameActivity
+          versions of these settings (Unity 6+). For the legacy UnityPlayerActivity
+          entry point use:
+              android:theme="@style/UnityThemeSelector"
+          and remove the android.app.lib_name meta-data.
+        -->
+        <activity
+            android:name="com.example.hybridfight.NfcUnityActivity"
+            android:label="@string/app_name"
+            android:theme="@style/BaseUnityGameActivityTheme"
+            android:screenOrientation="portrait"
+            android:launchMode="singleTask"
+            android:configChanges="fontScale|keyboard|keyboardHidden|locale|mnc|mcc|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|touchscreen"
+            android:exported="true"
+            android:hardwareAccelerated="true">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <meta-data android:name="android.app.lib_name" android:value="game" />
+        </activity>
+    </application>
+</manifest>
