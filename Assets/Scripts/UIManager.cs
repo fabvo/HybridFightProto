@@ -9,17 +9,12 @@ using UnityEngine.InputSystem.UI;
 /// <summary>
 /// Builds the entire UI in code so you don't have to wire anything up in the Unity scene.
 ///
-/// Game-screen layout (top to bottom):
-///   - Opponent HP bar
-///   - NFC status badge (always visible, color-coded for diagnostics)
-///   - Mode indicator (BLOCK / ANGRIFF / FOKUS / BEREIT) + hint
-///   - Charge bar (pulses during focus)
-///   - Player HP bar
+/// NFC status badge has three visual states (driven by ReaderMode polling):
+///   - Red    "noch kein Tag erkannt"           : nothing seen yet this session
+///   - Green  "TAG LIEGT DRAUF  UID:XX"         : tag is currently in field (events <0.6s old)
+///   - Gray   "letzter Tag UID:XX vor 1.4s"     : tag was lifted, waiting for next contact
 ///
-/// Visual effects layered on top:
-///   - Golden full-screen flash on each NFC tag detection
-///   - Live swipe trail from start finger position to current finger position (AttackReady)
-///   - Orange flash + "+X SCHADEN" floating popup when an attack swipe completes
+/// While TAG LIEGT DRAUF the badge also gently pulses to make the live state obvious.
 /// </summary>
 public class UIManager : MonoBehaviour
 {
@@ -32,7 +27,7 @@ public class UIManager : MonoBehaviour
     GameObject lobbyPanel, gamePanel;
     InputField ipInput;
     Text statusText, modeText, myHpText, oppHpText, gameOverText, hintText, soloBadge, nfcStatusText;
-    Image myHpBar, oppHpBar, chargeBar, chargeBarBgImage;
+    Image myHpBar, oppHpBar, chargeBar;
     Image nfcStatusBg, nfcFlash, attackFlash;
     Image swipeLine;
     Text damagePopup;
@@ -88,23 +83,40 @@ public class UIManager : MonoBehaviour
     void UpdateNfcStatus()
     {
         if (nfc == null) return;
+
         if (nfc.LastTagId == null)
         {
-            nfcStatusText.text  = "NFC: noch kein Tag erkannt";
-            nfcStatusBg .color  = new Color(0.45f, 0.18f, 0.18f, 1f);
+            nfcStatusText.text = "NFC: noch kein Tag erkannt";
+            nfcStatusBg .color = new Color(0.45f, 0.18f, 0.18f, 1f);
+        }
+        else if (nfc.TagPresent)
+        {
+            // Live, tag is on the phone right now. Slow gentle pulse so you can see updates flowing.
+            float pulse = 0.5f + 0.5f * Mathf.Sin(Time.time * 5f);
+            nfcStatusText.text = $"TAG LIEGT DRAUF  UID:{nfc.LastTagId}";
+            nfcStatusBg .color = Color.Lerp(new Color(0.18f, 0.55f, 0.22f, 1f),
+                                            new Color(0.30f, 0.80f, 0.35f, 1f), pulse);
         }
         else
         {
             float since = nfc.SecondsSinceLastTag;
-            nfcStatusText.text  = $"NFC erkannt #{nfc.TagsDetectedCount}  UID:{nfc.LastTagId}  vor {since:0.0}s";
-            nfcStatusBg .color  = new Color(0.18f, 0.45f, 0.22f, 1f);
+            nfcStatusText.text = $"letzter Tag #{nfc.TagsDetectedCount}  UID:{nfc.LastTagId}  vor {since:0.0}s";
+            nfcStatusBg .color = new Color(0.30f, 0.32f, 0.36f, 1f);
         }
     }
 
     void OnNfcDiscovered(string uid)
     {
-        StartCoroutine(FlashOverlay(nfcFlash, new Color(1f, 0.85f, 0.25f, 0.65f), 0.45f));
+        // Only flash on the first event of a contact, not on every poll while it's lying there.
+        // We approximate "first event" by checking that the tag was NOT present an instant ago.
+        // The NfcManager increments TagsDetectedCount only on first contact -- piggyback on that.
+        if (lastSeenContactCount != nfc.TagsDetectedCount)
+        {
+            lastSeenContactCount = nfc.TagsDetectedCount;
+            StartCoroutine(FlashOverlay(nfcFlash, new Color(1f, 0.85f, 0.25f, 0.65f), 0.45f));
+        }
     }
+    int lastSeenContactCount;
 
     void OnNfcError(string err)
     {
@@ -137,7 +149,6 @@ public class UIManager : MonoBehaviour
         rt.sizeDelta         = new Vector2(distance, 14f);
         rt.localEulerAngles  = new Vector3(0, 0, angleDeg);
 
-        // Fade color toward red+orange the longer the swipe (visual energy buildup).
         float t = Mathf.Clamp01(distance / 600f);
         swipeLine.color = Color.Lerp(new Color(1f, 1f, 1f, 0.55f),
                                      new Color(1f, 0.4f, 0.2f, 0.95f), t);
@@ -208,7 +219,6 @@ public class UIManager : MonoBehaviour
     // -----------------------------------------------------------------------
     void BuildUi()
     {
-        // --- Canvas ---
         var canvasGo = new GameObject("Canvas");
         canvas = canvasGo.AddComponent<Canvas>();
         canvas.renderMode = RenderMode.ScreenSpaceOverlay;
@@ -219,7 +229,6 @@ public class UIManager : MonoBehaviour
         canvasGo.AddComponent<GraphicRaycaster>();
         canvasRect = canvasGo.GetComponent<RectTransform>();
 
-        // --- EventSystem ---
         var es = new GameObject("EventSystem");
         es.AddComponent<EventSystem>();
 #if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
@@ -254,7 +263,6 @@ public class UIManager : MonoBehaviour
         gamePanel = MakePanel("GamePanel", canvasGo.transform, new Color(0.05f, 0.06f, 0.10f));
         gamePanel.SetActive(false);
 
-        // Top: opponent
         oppHpText = MakeText(gamePanel.transform, "Gegner: 100", new Vector2(0, 850), 40);
         oppHpBar  = MakeBar (gamePanel.transform, new Vector2(0, 780), new Color(0.9f, 0.3f, 0.3f), 800f, 35f);
 
@@ -262,7 +270,7 @@ public class UIManager : MonoBehaviour
         soloBadge.color = new Color(0.55f, 0.85f, 0.55f);
         soloBadge.gameObject.SetActive(false);
 
-        // NFC status badge -- always visible, recolors based on state.
+        // NFC status badge
         var nfcGo = new GameObject("NfcStatus");
         nfcGo.transform.SetParent(gamePanel.transform, false);
         var nfcRt = nfcGo.AddComponent<RectTransform>();
@@ -274,7 +282,7 @@ public class UIManager : MonoBehaviour
         nfcStatusText = MakeText(nfcGo.transform, "NFC: noch kein Tag erkannt", Vector2.zero, 28);
         nfcStatusText.color = new Color(1f, 1f, 1f, 0.95f);
 
-        // Center: mode indicator
+        // Mode indicator
         modeText = MakeText(gamePanel.transform, "-", new Vector2(0, 100), 90);
         modeText.fontStyle = FontStyle.Bold;
 
@@ -285,7 +293,7 @@ public class UIManager : MonoBehaviour
         MakeText(gamePanel.transform, "AUFLADUNG", new Vector2(0, -550), 32);
         chargeBar = MakeBar(gamePanel.transform, new Vector2(0, -620), chargeBarBaseColor, 800f, 35f);
 
-        // Bottom: self
+        // Self
         myHpText = MakeText(gamePanel.transform, "Du: 100", new Vector2(0, -760), 40);
         myHpBar  = MakeBar (gamePanel.transform, new Vector2(0, -830), new Color(0.3f, 0.85f, 0.4f), 800f, 35f);
 
@@ -294,8 +302,7 @@ public class UIManager : MonoBehaviour
         gameOverText.fontStyle = FontStyle.Bold;
         gameOverText.gameObject.SetActive(false);
 
-        // ===================== Overlays (added LAST so they render on top) =====
-        // Swipe trail: a single thin Image stretched between start and current touch.
+        // ===================== Overlays =====
         var slGo = new GameObject("SwipeLine");
         slGo.transform.SetParent(gamePanel.transform, false);
         var slRt = slGo.AddComponent<RectTransform>();
@@ -308,14 +315,12 @@ public class UIManager : MonoBehaviour
         swipeLine.raycastTarget = false;
         slGo.SetActive(false);
 
-        // Damage popup
         damagePopup = MakeText(gamePanel.transform, "", new Vector2(0, 100), 84);
         damagePopup.fontStyle = FontStyle.Bold;
         damagePopup.color = new Color(1f, 0.55f, 0.2f, 1f);
         damagePopup.gameObject.SetActive(false);
         damagePopup.raycastTarget = false;
 
-        // Full-screen flash overlays
         nfcFlash    = MakeFullScreenOverlay(gamePanel.transform, "NfcFlash",    new Color(1f, 0.85f, 0.25f, 0f));
         attackFlash = MakeFullScreenOverlay(gamePanel.transform, "AttackFlash", new Color(1f, 0.45f, 0.15f, 0f));
     }
@@ -335,7 +340,6 @@ public class UIManager : MonoBehaviour
         return img;
     }
 
-    // -----------------------------------------------------------------------
     void UpdateHp()
     {
         myHpText.text  = "Du: " + game.MyHp;
@@ -363,12 +367,12 @@ public class UIManager : MonoBehaviour
             case PlayerMode.Focusing:
                 modeText.text = "FOKUS";
                 modeText.color = new Color(1f, 0.9f, 0.3f);
-                hintText.text = "Lade auf... (Wischen ist deaktiviert)";
+                hintText.text = "Lade auf... (nicht abheben!)";
                 break;
             default:
                 modeText.text = "BEREIT";
                 modeText.color = new Color(0.6f, 0.6f, 0.7f);
-                hintText.text = "Aufrecht = Block · Flach hoch = Angriff · Auf NFC = Fokus";
+                hintText.text = "Aufrecht = Block · Flach hoch = Angriff · Auf NFC-Karte = Fokus";
                 break;
         }
     }

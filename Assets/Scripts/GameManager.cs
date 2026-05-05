@@ -12,12 +12,13 @@ public enum PlayerMode { Idle, Blocking, AttackReady, Focusing }
 /// Core game logic. Combines TiltDetector + NfcManager into a PlayerMode, handles charging,
 /// detects the swipe-to-attack gesture, applies damage, and syncs HP with the opponent.
 ///
-/// Exposed public state for UI feedback:
-///   - SwipeActive / SwipeStart / SwipeCurrent  (line-from-finger visualization)
-///   - OnAttackFired(damage)                    (flash + damage popup)
+/// Focus mode is now driven by NfcManager.TagPresent, which (thanks to ReaderMode in the
+/// Java plugin) reflects the actual physical presence of the tag in real time. As soon
+/// as the player lifts the phone off the card, the focus mode terminates within ~0.6s.
 ///
-/// Explicit guard: any touch input is ignored while Mode == Focusing, even though the
-/// orientation-based mode resolution should already prevent that scenario in practice.
+/// Exposed for UI feedback:
+///   - SwipeActive / SwipeStart / SwipeCurrent
+///   - OnAttackFired(damage)
 /// </summary>
 public class GameManager : MonoBehaviour
 {
@@ -38,7 +39,7 @@ public class GameManager : MonoBehaviour
     public int  Charge     { get; private set; } = 0;
     public bool GameOver   { get; private set; }
 
-    // For UI swipe visualization
+    // Swipe visualization
     public bool    SwipeActive  { get; private set; }
     public Vector2 SwipeStart   { get; private set; }
     public Vector2 SwipeCurrent { get; private set; }
@@ -47,7 +48,7 @@ public class GameManager : MonoBehaviour
     public event System.Action OnHpChanged;
     public event System.Action OnChargeChanged;
     public event System.Action OnGameOver;
-    public event System.Action<int> OnAttackFired;  // damage value, fires when our attack swipe completes
+    public event System.Action<int> OnAttackFired;
 
     TiltDetector       tilt;
     NfcManager         nfc;
@@ -80,23 +81,28 @@ public class GameManager : MonoBehaviour
         DetectSwipe();
     }
 
-    // -----------------------------------------------------------------------
-    // Mode resolution: tilt + NFC -> PlayerMode
-    // -----------------------------------------------------------------------
     void UpdateMode()
     {
+        // Mode resolution priority:
+        //   1. Block (deliberate defense gesture)               -- always wins
+        //   2. Focus (NFC tag actively in field)                -- overrides AttackReady
+        //   3. AttackReady (phone flat with screen up)
+        //   4. Idle
+        //
+        // Why does Focus override AttackReady? The NFC antenna sits on the BACK of the
+        // phone. Putting the phone "on" a focus card therefore means screen-up with the
+        // back touching the card -- which is the same tilt as AttackReady. Tag presence
+        // is the disambiguating signal: if the tag is being read, the player is clearly
+        // engaging the card and not preparing to swipe.
         PlayerMode next;
-        switch (tilt.State)
-        {
-            case TiltState.Block:       next = PlayerMode.Blocking;    break;
-            case TiltState.AttackReady: next = PlayerMode.AttackReady; break;
-            case TiltState.FaceDown:
-                // Phone screen-down. We only call this "focusing" if a tag has been
-                // detected within the very generous 10-minute window.
-                next = nfc.RecentlyDetected() ? PlayerMode.Focusing : PlayerMode.Idle;
-                break;
-            default: next = PlayerMode.Idle; break;
-        }
+        if (tilt.State == TiltState.Block)
+            next = PlayerMode.Blocking;
+        else if (nfc.TagPresent)
+            next = PlayerMode.Focusing;
+        else if (tilt.State == TiltState.AttackReady)
+            next = PlayerMode.AttackReady;
+        else
+            next = PlayerMode.Idle;
 
         if (next != Mode)
         {
@@ -114,29 +120,15 @@ public class GameManager : MonoBehaviour
         if (Charge != prev) OnChargeChanged?.Invoke();
     }
 
-    // -----------------------------------------------------------------------
-    // Swipe-to-attack
-    // Explicitly disabled during Focusing -- defense in depth for the rare case
-    // where touch events still register face-down.
-    // -----------------------------------------------------------------------
     void DetectSwipe()
     {
-        if (Mode == PlayerMode.Focusing)
-        {
-            SwipeActive = false;
-            return;
-        }
-        if (Mode != PlayerMode.AttackReady)
-        {
-            SwipeActive = false;
-            return;
-        }
+        if (Mode == PlayerMode.Focusing) { SwipeActive = false; return; }
+        if (Mode != PlayerMode.AttackReady) { SwipeActive = false; return; }
 
         Vector2 pos;
         bool    began, ended;
         if (!ReadPrimaryTouch(out pos, out began, out ended))
         {
-            // Finger lifted between frames or no touch -> stop visual trail.
             if (!Input_TouchActive()) SwipeActive = false;
             return;
         }
@@ -161,7 +153,6 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    /// <summary>True if any touch is currently down.</summary>
     bool Input_TouchActive()
     {
 #if ENABLE_LEGACY_INPUT_MANAGER
@@ -208,9 +199,6 @@ public class GameManager : MonoBehaviour
         OnAttackFired?.Invoke(damage);
     }
 
-    // -----------------------------------------------------------------------
-    // Damage taken
-    // -----------------------------------------------------------------------
     void HandleIncomingAttack(int incoming)
     {
         if (soloRespawningPlayer) return;

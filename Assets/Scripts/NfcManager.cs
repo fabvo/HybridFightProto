@@ -7,34 +7,46 @@ using UnityEngine;
 /// This component MUST sit on a GameObject named exactly "NfcManager" because
 /// UnitySendMessage looks the receiver up by GameObject name.
 ///
-/// Android does not fire a "tag removed" event. We therefore expose
-/// LastTagId / LastTagTime / RecentlyDetected and let the GameManager combine
-/// that with the phone's orientation to decide if the player is currently focusing.
+/// With ReaderMode, the Java plugin fires OnNfcTagDiscovered roughly every
+/// 100-150 ms while a tag sits on the phone. We use that to derive
+/// <see cref="TagPresent"/>: true if a discovery event has happened within the
+/// last <see cref="PresenceWindow"/> seconds. When the player lifts the phone,
+/// no more events come in and TagPresent flips back to false after that window.
 /// </summary>
 public class NfcManager : MonoBehaviour
 {
+    /// <summary>
+    /// How long after the last detection we still consider the tag "present".
+    /// Should be larger than the OS polling interval (~125 ms) plus some jitter.
+    /// 0.6 s is a good compromise -- responsive but not flickery.
+    /// </summary>
+    public const float PresenceWindow = 0.6f;
+
     public string LastTagId        { get; private set; }
     public float  LastTagTime      { get; private set; } = -999f;
     public int    TagsDetectedCount{ get; private set; }
     public string LastError        { get; private set; }
 
-    public event System.Action<string> OnTagDiscovered;
-    public event System.Action<string> OnPluginError;
-
-    /// <summary>True if a tag has been seen within the last <paramref name="windowSeconds"/> seconds.</summary>
-    public bool RecentlyDetected(float windowSeconds = 600f)
-        => LastTagId != null && Time.time - LastTagTime < windowSeconds;
+    /// <summary>True while the tag is physically on the phone (within PresenceWindow seconds of last event).</summary>
+    public bool TagPresent => LastTagId != null && Time.time - LastTagTime < PresenceWindow;
 
     public float SecondsSinceLastTag => Time.time - LastTagTime;
+
+    public event System.Action<string> OnTagDiscovered;
+    public event System.Action<string> OnPluginError;
 
     // -- Methods called from Java plugin via UnitySendMessage("NfcManager", ...) --
 
     public void OnNfcTagDiscovered(string tagId)
     {
-        LastTagId = tagId;
+        bool isFirstThisSession = LastTagId == null || !TagPresent;
+        LastTagId   = tagId;
         LastTagTime = Time.time;
-        TagsDetectedCount++;
-        Debug.Log($"[NFC] Tag #{TagsDetectedCount} detected: {tagId}");
+        if (isFirstThisSession)
+        {
+            TagsDetectedCount++;
+            Debug.Log($"[NFC] Tag #{TagsDetectedCount} placed: {tagId}");
+        }
         OnTagDiscovered?.Invoke(tagId);
     }
 
