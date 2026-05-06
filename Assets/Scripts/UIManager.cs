@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
@@ -9,28 +10,27 @@ using UnityEngine.InputSystem.UI;
 /// <summary>
 /// Builds the entire UI in code so you don't have to wire anything up in the Unity scene.
 ///
-/// NFC status badge has three visual states (driven by ReaderMode polling):
-///   - Red    "noch kein Tag erkannt"           : nothing seen yet this session
-///   - Green  "TAG LIEGT DRAUF  UID:XX"         : tag is currently in field (events <0.6s old)
-///   - Gray   "letzter Tag UID:XX vor 1.4s"     : tag was lifted, waiting for next contact
-///
-/// While TAG LIEGT DRAUF the badge also gently pulses to make the live state obvious.
+/// Three top-level panels (only one visible at a time):
+///   - Lobby:         Solo / BT Host / BT Verbinden / BT Pairing
+///   - Picker:        list of paired BT devices to choose for connecting
+///   - Game:          actual gameplay HUD with HP bars, mode, charge, swipe trail
 /// </summary>
 public class UIManager : MonoBehaviour
 {
     GameManager       game;
     NetworkController net;
+    BluetoothManager  bt;
     NfcManager        nfc;
     Canvas            canvas;
     RectTransform     canvasRect;
 
-    GameObject lobbyPanel, gamePanel;
-    InputField ipInput;
-    Text statusText, modeText, myHpText, oppHpText, gameOverText, hintText, soloBadge, nfcStatusText;
-    Image myHpBar, oppHpBar, chargeBar;
-    Image nfcStatusBg, nfcFlash, attackFlash;
-    Image swipeLine;
-    Text damagePopup;
+    GameObject lobbyPanel, pickerPanel, gamePanel;
+    Text       lobbyStatusText, pickerStatusText, modeText, myHpText, oppHpText;
+    Text       gameOverText, hintText, soloBadge, nfcStatusText;
+    Image      myHpBar, oppHpBar, chargeBar;
+    Image      nfcStatusBg, nfcFlash, attackFlash, swipeLine;
+    Text       damagePopup;
+    Transform  pickerListContent;
 
     Sprite uiSprite;
     Color  chargeBarBaseColor   = new Color(1f, 0.85f, 0.20f);
@@ -40,6 +40,7 @@ public class UIManager : MonoBehaviour
     {
         game = GetComponent<GameManager>();
         net  = GetComponent<NetworkController>();
+        bt   = BluetoothManager.Instance;
         nfc  = GameObject.Find("NfcManager").GetComponent<NfcManager>();
 
         uiSprite = Sprite.Create(Texture2D.whiteTexture, new Rect(0, 0, 1, 1), new Vector2(0.5f, 0.5f));
@@ -47,7 +48,7 @@ public class UIManager : MonoBehaviour
         BuildUi();
 
         net.OnConnected     += OnConnected;
-        net.OnDisconnected  += () => { lobbyPanel.SetActive(true);  gamePanel.SetActive(false); };
+        net.OnDisconnected  += OnDisconnected;
         game.OnHpChanged    += UpdateHp;
         game.OnChargeChanged+= UpdateCharge;
         game.OnModeChanged  += UpdateMode;
@@ -60,29 +61,60 @@ public class UIManager : MonoBehaviour
         UpdateCharge();
         UpdateMode(PlayerMode.Idle);
         UpdateNfcStatus();
-    }
-
-    void OnConnected()
-    {
-        lobbyPanel.SetActive(false);
-        gamePanel.SetActive(true);
-        oppHpText.text = (net.IsSolo ? "Trainer: " : "Gegner: ") + game.OpponentHp;
-        soloBadge.gameObject.SetActive(net.IsSolo);
-        UpdateNfcStatus();
+        ShowLobby();
     }
 
     void Update()
     {
-        statusText.text = $"{net.Status}\nMeine IP: {net.LocalIp}";
+        if (lobbyPanel.activeSelf)
+            lobbyStatusText.text = net.Status;
+        if (pickerPanel.activeSelf)
+            pickerStatusText.text = bt != null ? bt.Status : "";
+
         UpdateNfcStatus();
         UpdateSwipeTrail();
         UpdateChargePulse();
     }
 
-    // ===================== NFC status & flash ==============================
+    // ===================== Panel switching =====================
+    void ShowLobby()
+    {
+        lobbyPanel.SetActive(true);
+        pickerPanel.SetActive(false);
+        gamePanel.SetActive(false);
+    }
+
+    void ShowPicker()
+    {
+        lobbyPanel.SetActive(false);
+        pickerPanel.SetActive(true);
+        gamePanel.SetActive(false);
+        RefreshDeviceList();
+    }
+
+    void ShowGame()
+    {
+        lobbyPanel.SetActive(false);
+        pickerPanel.SetActive(false);
+        gamePanel.SetActive(true);
+    }
+
+    void OnConnected()
+    {
+        oppHpText.text = (net.IsSolo ? "Trainer: " : "Gegner: ") + game.OpponentHp;
+        soloBadge.gameObject.SetActive(net.IsSolo);
+        ShowGame();
+    }
+
+    void OnDisconnected()
+    {
+        ShowLobby();
+    }
+
+    // ===================== NFC status =====================
     void UpdateNfcStatus()
     {
-        if (nfc == null) return;
+        if (nfc == null || nfcStatusText == null) return;
 
         if (nfc.LastTagId == null)
         {
@@ -91,7 +123,6 @@ public class UIManager : MonoBehaviour
         }
         else if (nfc.TagPresent)
         {
-            // Live, tag is on the phone right now. Slow gentle pulse so you can see updates flowing.
             float pulse = 0.5f + 0.5f * Mathf.Sin(Time.time * 5f);
             nfcStatusText.text = $"TAG LIEGT DRAUF  UID:{nfc.LastTagId}";
             nfcStatusBg .color = Color.Lerp(new Color(0.18f, 0.55f, 0.22f, 1f),
@@ -105,18 +136,15 @@ public class UIManager : MonoBehaviour
         }
     }
 
+    int lastSeenContactCount;
     void OnNfcDiscovered(string uid)
     {
-        // Only flash on the first event of a contact, not on every poll while it's lying there.
-        // We approximate "first event" by checking that the tag was NOT present an instant ago.
-        // The NfcManager increments TagsDetectedCount only on first contact -- piggyback on that.
         if (lastSeenContactCount != nfc.TagsDetectedCount)
         {
             lastSeenContactCount = nfc.TagsDetectedCount;
             StartCoroutine(FlashOverlay(nfcFlash, new Color(1f, 0.85f, 0.25f, 0.65f), 0.45f));
         }
     }
-    int lastSeenContactCount;
 
     void OnNfcError(string err)
     {
@@ -124,7 +152,7 @@ public class UIManager : MonoBehaviour
         nfcStatusText.text = "NFC: " + err;
     }
 
-    // ===================== Swipe trail =====================================
+    // ===================== Swipe trail =====================
     void UpdateSwipeTrail()
     {
         if (game == null || !game.SwipeActive)
@@ -132,29 +160,27 @@ public class UIManager : MonoBehaviour
             if (swipeLine.gameObject.activeSelf) swipeLine.gameObject.SetActive(false);
             return;
         }
-
         if (!swipeLine.gameObject.activeSelf) swipeLine.gameObject.SetActive(true);
 
         Vector2 a, b;
         RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRect, game.SwipeStart,   null, out a);
         RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRect, game.SwipeCurrent, null, out b);
 
-        Vector2 mid     = (a + b) * 0.5f;
-        Vector2 delta   = b - a;
-        float distance  = delta.magnitude;
-        float angleDeg  = Mathf.Atan2(delta.y, delta.x) * Mathf.Rad2Deg;
+        Vector2 mid    = (a + b) * 0.5f;
+        Vector2 delta  = b - a;
+        float   dist   = delta.magnitude;
+        float   angle  = Mathf.Atan2(delta.y, delta.x) * Mathf.Rad2Deg;
 
         var rt = swipeLine.rectTransform;
-        rt.anchoredPosition  = mid;
-        rt.sizeDelta         = new Vector2(distance, 14f);
-        rt.localEulerAngles  = new Vector3(0, 0, angleDeg);
+        rt.anchoredPosition = mid;
+        rt.sizeDelta        = new Vector2(dist, 14f);
+        rt.localEulerAngles = new Vector3(0, 0, angle);
 
-        float t = Mathf.Clamp01(distance / 600f);
+        float t = Mathf.Clamp01(dist / 600f);
         swipeLine.color = Color.Lerp(new Color(1f, 1f, 1f, 0.55f),
                                      new Color(1f, 0.4f, 0.2f, 0.95f), t);
     }
 
-    // ===================== Charge bar pulse during focus ==================
     void UpdateChargePulse()
     {
         if (chargeBar == null) return;
@@ -163,13 +189,9 @@ public class UIManager : MonoBehaviour
             float pulse = 0.5f + 0.5f * Mathf.Sin(Time.time * 6f);
             chargeBar.color = Color.Lerp(chargeBarBaseColor, chargeBarPulseColor, pulse);
         }
-        else
-        {
-            chargeBar.color = chargeBarBaseColor;
-        }
+        else chargeBar.color = chargeBarBaseColor;
     }
 
-    // ===================== Attack feedback =================================
     void OnAttackFired(int damage)
     {
         StartCoroutine(FlashOverlay(attackFlash, new Color(1f, 0.45f, 0.15f, 0.55f), 0.35f));
@@ -191,9 +213,7 @@ public class UIManager : MonoBehaviour
             t += Time.deltaTime;
             float p = t / duration;
             rt.anchoredPosition = Vector2.Lerp(startPos, endPos, p);
-            var c = damagePopup.color;
-            c.a = 1f - p;
-            damagePopup.color = c;
+            var c = damagePopup.color; c.a = 1f - p; damagePopup.color = c;
             yield return null;
         }
         damagePopup.gameObject.SetActive(false);
@@ -208,15 +228,14 @@ public class UIManager : MonoBehaviour
         {
             t += Time.deltaTime;
             float p = t / duration;
-            var c = startColor;
-            c.a = startColor.a * (1f - p);
+            var c = startColor; c.a = startColor.a * (1f - p);
             overlay.color = c;
             yield return null;
         }
         overlay.gameObject.SetActive(false);
     }
 
-    // -----------------------------------------------------------------------
+    // ===================== Build the UI tree =====================
     void BuildUi()
     {
         var canvasGo = new GameObject("Canvas");
@@ -237,30 +256,200 @@ public class UIManager : MonoBehaviour
         es.AddComponent<StandaloneInputModule>();
 #endif
 
-        // ===================== Lobby =====================
-        lobbyPanel = MakePanel("LobbyPanel", canvasGo.transform, new Color(0.08f, 0.10f, 0.16f));
+        BuildLobby(canvasGo.transform);
+        BuildPicker(canvasGo.transform);
+        BuildGame(canvasGo.transform);
+    }
+
+    // ----- Lobby -----
+    void BuildLobby(Transform parent)
+    {
+        lobbyPanel = MakePanel("LobbyPanel", parent, new Color(0.08f, 0.10f, 0.16f));
 
         var title = MakeText(lobbyPanel.transform, "HYBRID FIGHT", new Vector2(0, 760), 90);
         title.fontStyle = FontStyle.Bold;
         title.color = new Color(0.7f, 1f, 0.7f);
 
-        MakeText(lobbyPanel.transform, "Prototype – beide Geraete ins gleiche WLAN!", new Vector2(0, 660), 30);
         MakeText(lobbyPanel.transform,
-            "Zwei Spieler:  Spieler 1 drueckt HOST, Spieler 2 tippt die IP ein und JOIN.\n"
-          + "Allein testen: SOLO druecken, KI greift dich an.",
-            new Vector2(0, 470), 28);
+            "Verbinde dich per Bluetooth mit dem Partner-Handy.\n"
+          + "Hinweis: Beide Handys muessen einmalig in den Android-Bluetooth-\n"
+          + "Einstellungen miteinander gekoppelt sein.",
+            new Vector2(0, 540), 28);
 
-        ipInput = MakeInputField(lobbyPanel.transform, "z.B. 192.168.1.42", new Vector2(0, 230));
+        MakeButton(lobbyPanel.transform, "SOLO TEST",     new Vector2(0,  280),
+            new Color(0.40f, 0.70f, 0.45f), () => net.StartSolo());
 
-        MakeButton(lobbyPanel.transform, "JOIN",      new Vector2(0,  100), new Color(0.30f, 0.55f, 0.85f), () => net.Join(ipInput.text));
-        MakeButton(lobbyPanel.transform, "HOST",      new Vector2(0,  -50), new Color(0.85f, 0.45f, 0.30f), () => net.StartHost());
-        MakeButton(lobbyPanel.transform, "SOLO TEST", new Vector2(0, -200), new Color(0.40f, 0.70f, 0.45f), () => net.StartSolo());
+        MakeButton(lobbyPanel.transform, "BT HOST",       new Vector2(0,  100),
+            new Color(0.85f, 0.45f, 0.30f), () => net.StartBluetoothHost());
 
-        statusText = MakeText(lobbyPanel.transform, "Nicht verbunden", new Vector2(0, -500), 30);
-        statusText.color = new Color(0.7f, 0.7f, 0.8f);
+        MakeButton(lobbyPanel.transform, "BT VERBINDEN",  new Vector2(0,  -80),
+            new Color(0.30f, 0.55f, 0.85f), ShowPicker);
 
-        // ===================== Game =====================
-        gamePanel = MakePanel("GamePanel", canvasGo.transform, new Color(0.05f, 0.06f, 0.10f));
+        MakeButton(lobbyPanel.transform, "PAIRING-EINSTELLUNGEN", new Vector2(0, -240),
+            new Color(0.40f, 0.42f, 0.50f), () => bt?.OpenSettings());
+
+        lobbyStatusText = MakeText(lobbyPanel.transform, "Nicht verbunden", new Vector2(0, -550), 30);
+        lobbyStatusText.color = new Color(0.7f, 0.7f, 0.8f);
+    }
+
+    // ----- Device picker -----
+    void BuildPicker(Transform parent)
+    {
+        pickerPanel = MakePanel("PickerPanel", parent, new Color(0.08f, 0.10f, 0.16f));
+        pickerPanel.SetActive(false);
+
+        var title = MakeText(pickerPanel.transform, "GERAET WAEHLEN", new Vector2(0, 800), 70);
+        title.fontStyle = FontStyle.Bold;
+        title.color = new Color(0.7f, 0.85f, 1f);
+
+        MakeText(pickerPanel.transform,
+            "Tippe auf das Partner-Handy um zu verbinden.",
+            new Vector2(0, 700), 26);
+
+        // ScrollRect with vertical layout
+        var scrollGo = new GameObject("Scroll");
+        scrollGo.transform.SetParent(pickerPanel.transform, false);
+        var scrollRt = scrollGo.AddComponent<RectTransform>();
+        scrollRt.sizeDelta = new Vector2(900, 1100);
+        scrollRt.anchoredPosition = new Vector2(0, 50);
+        var scrollImg = scrollGo.AddComponent<Image>();
+        scrollImg.color = new Color(0.10f, 0.12f, 0.16f, 0.9f);
+        scrollImg.sprite = uiSprite;
+        scrollGo.AddComponent<RectMask2D>();
+        var scrollRect = scrollGo.AddComponent<ScrollRect>();
+        scrollRect.horizontal = false;
+        scrollRect.vertical   = true;
+
+        var contentGo = new GameObject("Content");
+        contentGo.transform.SetParent(scrollGo.transform, false);
+        var contentRt = contentGo.AddComponent<RectTransform>();
+        contentRt.anchorMin = new Vector2(0, 1);
+        contentRt.anchorMax = new Vector2(1, 1);
+        contentRt.pivot     = new Vector2(0.5f, 1);
+        contentRt.anchoredPosition = Vector2.zero;
+        contentRt.sizeDelta = new Vector2(0, 0);
+
+        var vlg = contentGo.AddComponent<VerticalLayoutGroup>();
+        vlg.padding             = new RectOffset(20, 20, 20, 20);
+        vlg.spacing             = 15;
+        vlg.childForceExpandWidth = true;
+        vlg.childControlWidth   = true;
+        vlg.childForceExpandHeight = false;
+        vlg.childControlHeight  = false;
+        var fitter = contentGo.AddComponent<ContentSizeFitter>();
+        fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+        scrollRect.content  = contentRt;
+        scrollRect.viewport = scrollRt;
+        pickerListContent   = contentGo.transform;
+
+        MakeButton(pickerPanel.transform, "AKTUALISIEREN", new Vector2(0, -640),
+            new Color(0.40f, 0.45f, 0.55f), RefreshDeviceList);
+        MakeButton(pickerPanel.transform, "PAIRING-EINSTELLUNGEN", new Vector2(0, -780),
+            new Color(0.40f, 0.45f, 0.55f), () => bt?.OpenSettings());
+        MakeButton(pickerPanel.transform, "ABBRECHEN", new Vector2(0, -920),
+            new Color(0.55f, 0.30f, 0.30f), ShowLobby);
+
+        pickerStatusText = MakeText(pickerPanel.transform, "", new Vector2(0, -1050), 26);
+        pickerStatusText.color = new Color(0.7f, 0.7f, 0.8f);
+    }
+
+    void RefreshDeviceList()
+    {
+        if (pickerListContent == null) return;
+        for (int i = pickerListContent.childCount - 1; i >= 0; i--)
+            Destroy(pickerListContent.GetChild(i).gameObject);
+
+        if (bt == null)
+        {
+            AddPickerLabel("Bluetooth nicht verfuegbar.");
+            return;
+        }
+        if (!bt.IsSupported())
+        {
+            AddPickerLabel("Geraet hat kein Bluetooth.");
+            return;
+        }
+        if (!bt.HasConnectPermission())
+        {
+            AddPickerLabel("Bluetooth-Berechtigung fehlt.");
+            AddPickerActionButton("Berechtigung anfragen", () => bt.RequestPermission());
+            return;
+        }
+        if (!bt.IsEnabled())
+        {
+            AddPickerLabel("Bluetooth ist ausgeschaltet.");
+            AddPickerActionButton("Bluetooth einschalten", () => bt.RequestEnable());
+            return;
+        }
+
+        var devices = bt.GetPairedDevices();
+        if (devices.Count == 0)
+        {
+            AddPickerLabel("Keine gepaarten Geraete gefunden.\n"
+                         + "Koppele die Handys zuerst in den\n"
+                         + "Bluetooth-Einstellungen.");
+            return;
+        }
+
+        foreach (var d in devices)
+        {
+            string capturedAddr = d.Address;
+            string capturedName = d.Name;
+            AddPickerActionButton(capturedName + "\n" + capturedAddr,
+                () => OnDeviceSelected(capturedAddr, capturedName));
+        }
+    }
+
+    void OnDeviceSelected(string address, string name)
+    {
+        pickerStatusText.text = "Verbinde mit " + name + "...";
+        net.ConnectBluetooth(address);
+    }
+
+    void AddPickerLabel(string text)
+    {
+        var go = new GameObject("Label");
+        go.transform.SetParent(pickerListContent, false);
+        var rt = go.AddComponent<RectTransform>();
+        rt.sizeDelta = new Vector2(0, 200);
+        var t = go.AddComponent<Text>();
+        t.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        t.fontSize = 32;
+        t.alignment = TextAnchor.MiddleCenter;
+        t.color = new Color(0.85f, 0.85f, 0.9f);
+        t.text = text;
+        t.horizontalOverflow = HorizontalWrapMode.Wrap;
+        var le = go.AddComponent<LayoutElement>();
+        le.preferredHeight = 200;
+    }
+
+    void AddPickerActionButton(string label, System.Action onClick)
+    {
+        var btnGo = new GameObject("Btn_" + label);
+        btnGo.transform.SetParent(pickerListContent, false);
+        var rt = btnGo.AddComponent<RectTransform>();
+        rt.sizeDelta = new Vector2(0, 130);
+        var img = btnGo.AddComponent<Image>();
+        img.color = new Color(0.30f, 0.55f, 0.85f);
+        img.sprite = uiSprite;
+        var btn = btnGo.AddComponent<Button>();
+        btn.targetGraphic = img;
+        btn.onClick.AddListener(() => onClick());
+        var le = btnGo.AddComponent<LayoutElement>();
+        le.preferredHeight = 130;
+
+        var lbl = MakeText(btnGo.transform, label, Vector2.zero, 32);
+        lbl.fontStyle = FontStyle.Bold;
+        var cg = lbl.gameObject.AddComponent<CanvasGroup>();
+        cg.blocksRaycasts = false;
+        cg.interactable = false;
+    }
+
+    // ----- Game HUD -----
+    void BuildGame(Transform parent)
+    {
+        gamePanel = MakePanel("GamePanel", parent, new Color(0.05f, 0.06f, 0.10f));
         gamePanel.SetActive(false);
 
         oppHpText = MakeText(gamePanel.transform, "Gegner: 100", new Vector2(0, 850), 40);
@@ -270,7 +459,6 @@ public class UIManager : MonoBehaviour
         soloBadge.color = new Color(0.55f, 0.85f, 0.55f);
         soloBadge.gameObject.SetActive(false);
 
-        // NFC status badge
         var nfcGo = new GameObject("NfcStatus");
         nfcGo.transform.SetParent(gamePanel.transform, false);
         var nfcRt = nfcGo.AddComponent<RectTransform>();
@@ -282,27 +470,22 @@ public class UIManager : MonoBehaviour
         nfcStatusText = MakeText(nfcGo.transform, "NFC: noch kein Tag erkannt", Vector2.zero, 28);
         nfcStatusText.color = new Color(1f, 1f, 1f, 0.95f);
 
-        // Mode indicator
         modeText = MakeText(gamePanel.transform, "-", new Vector2(0, 100), 90);
         modeText.fontStyle = FontStyle.Bold;
 
         hintText = MakeText(gamePanel.transform, "", new Vector2(0, -50), 32);
         hintText.color = new Color(0.7f, 0.7f, 0.8f);
 
-        // Charge bar
         MakeText(gamePanel.transform, "AUFLADUNG", new Vector2(0, -550), 32);
         chargeBar = MakeBar(gamePanel.transform, new Vector2(0, -620), chargeBarBaseColor, 800f, 35f);
 
-        // Self
         myHpText = MakeText(gamePanel.transform, "Du: 100", new Vector2(0, -760), 40);
         myHpBar  = MakeBar (gamePanel.transform, new Vector2(0, -830), new Color(0.3f, 0.85f, 0.4f), 800f, 35f);
 
-        // Game-over overlay
         gameOverText = MakeText(gamePanel.transform, "", new Vector2(0, 350), 110);
         gameOverText.fontStyle = FontStyle.Bold;
         gameOverText.gameObject.SetActive(false);
 
-        // ===================== Overlays =====
         var slGo = new GameObject("SwipeLine");
         slGo.transform.SetParent(gamePanel.transform, false);
         var slRt = slGo.AddComponent<RectTransform>();
@@ -334,7 +517,7 @@ public class UIManager : MonoBehaviour
         rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
         var img = go.AddComponent<Image>();
         img.sprite = uiSprite;
-        img.color = color;
+        img.color  = color;
         img.raycastTarget = false;
         go.SetActive(false);
         return img;
@@ -355,24 +538,24 @@ public class UIManager : MonoBehaviour
         switch (m)
         {
             case PlayerMode.Blocking:
-                modeText.text = "BLOCK";
+                modeText.text  = "BLOCK";
                 modeText.color = new Color(0.4f, 0.7f, 1f);
-                hintText.text = "Halte das Handy aufrecht – du blockst.";
+                hintText.text  = "Halte das Handy aufrecht – du blockst.";
                 break;
             case PlayerMode.AttackReady:
-                modeText.text = "ANGRIFF";
+                modeText.text  = "ANGRIFF";
                 modeText.color = new Color(1f, 0.5f, 0.4f);
-                hintText.text = "Wische ueber den Bildschirm um anzugreifen!";
+                hintText.text  = "Wische ueber den Bildschirm um anzugreifen!";
                 break;
             case PlayerMode.Focusing:
-                modeText.text = "FOKUS";
+                modeText.text  = "FOKUS";
                 modeText.color = new Color(1f, 0.9f, 0.3f);
-                hintText.text = "Lade auf... (nicht abheben!)";
+                hintText.text  = "Lade auf... (nicht abheben!)";
                 break;
             default:
-                modeText.text = "BEREIT";
+                modeText.text  = "BEREIT";
                 modeText.color = new Color(0.6f, 0.6f, 0.7f);
-                hintText.text = "Aufrecht = Block · Flach hoch = Angriff · Auf NFC-Karte = Fokus";
+                hintText.text  = "Aufrecht = Block · Flach hoch = Angriff · Auf NFC-Karte = Fokus";
                 break;
         }
     }
@@ -380,7 +563,7 @@ public class UIManager : MonoBehaviour
     void ShowGameOver()
     {
         bool won = game.MyHp > 0;
-        gameOverText.text = won ? "GEWONNEN!" : "VERLOREN";
+        gameOverText.text  = won ? "GEWONNEN!" : "VERLOREN";
         gameOverText.color = won ? new Color(0.4f, 1f, 0.5f) : new Color(1f, 0.3f, 0.3f);
         gameOverText.gameObject.SetActive(true);
     }
@@ -391,10 +574,8 @@ public class UIManager : MonoBehaviour
         var go = new GameObject(name);
         go.transform.SetParent(parent, false);
         var rt = go.AddComponent<RectTransform>();
-        rt.anchorMin = Vector2.zero;
-        rt.anchorMax = Vector2.one;
-        rt.offsetMin = Vector2.zero;
-        rt.offsetMax = Vector2.zero;
+        rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
+        rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
         var img = go.AddComponent<Image>();
         img.color = bg;
         img.sprite = uiSprite;
@@ -419,60 +600,12 @@ public class UIManager : MonoBehaviour
         return t;
     }
 
-    InputField MakeInputField(Transform parent, string placeholder, Vector2 pos)
-    {
-        var go = new GameObject("InputField");
-        go.transform.SetParent(parent, false);
-        var rt = go.AddComponent<RectTransform>();
-        rt.sizeDelta = new Vector2(800, 110);
-        rt.anchoredPosition = pos;
-        var img = go.AddComponent<Image>();
-        img.color = new Color(0.18f, 0.20f, 0.26f);
-        img.sprite = uiSprite;
-
-        var input = go.AddComponent<InputField>();
-        input.targetGraphic = img;
-
-        var textGo = new GameObject("Text");
-        textGo.transform.SetParent(go.transform, false);
-        var textRt = textGo.AddComponent<RectTransform>();
-        textRt.anchorMin = Vector2.zero;
-        textRt.anchorMax = Vector2.one;
-        textRt.offsetMin = new Vector2(20, 0);
-        textRt.offsetMax = new Vector2(-20, 0);
-        var text = textGo.AddComponent<Text>();
-        text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-        text.fontSize = 40;
-        text.color = Color.white;
-        text.alignment = TextAnchor.MiddleLeft;
-        text.supportRichText = false;
-        input.textComponent = text;
-
-        var phGo = new GameObject("Placeholder");
-        phGo.transform.SetParent(go.transform, false);
-        var phRt = phGo.AddComponent<RectTransform>();
-        phRt.anchorMin = Vector2.zero;
-        phRt.anchorMax = Vector2.one;
-        phRt.offsetMin = new Vector2(20, 0);
-        phRt.offsetMax = new Vector2(-20, 0);
-        var ph = phGo.AddComponent<Text>();
-        ph.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-        ph.fontSize = 40;
-        ph.color = new Color(0.55f, 0.55f, 0.6f);
-        ph.alignment = TextAnchor.MiddleLeft;
-        ph.text = placeholder;
-        ph.fontStyle = FontStyle.Italic;
-        input.placeholder = ph;
-
-        return input;
-    }
-
     Button MakeButton(Transform parent, string label, Vector2 pos, Color color, System.Action onClick)
     {
         var go = new GameObject("Button_" + label);
         go.transform.SetParent(parent, false);
         var rt = go.AddComponent<RectTransform>();
-        rt.sizeDelta = new Vector2(500, 130);
+        rt.sizeDelta = new Vector2(560, 130);
         rt.anchoredPosition = pos;
         var img = go.AddComponent<Image>();
         img.color = color;
@@ -481,11 +614,11 @@ public class UIManager : MonoBehaviour
         btn.targetGraphic = img;
         btn.onClick.AddListener(() => onClick());
 
-        var lbl = MakeText(go.transform, label, Vector2.zero, 56);
+        var lbl = MakeText(go.transform, label, Vector2.zero, 48);
         lbl.fontStyle = FontStyle.Bold;
-        var lblCg = lbl.gameObject.AddComponent<CanvasGroup>();
-        lblCg.blocksRaycasts = false;
-        lblCg.interactable = false;
+        var cg = lbl.gameObject.AddComponent<CanvasGroup>();
+        cg.blocksRaycasts = false;
+        cg.interactable = false;
         return btn;
     }
 
@@ -503,10 +636,8 @@ public class UIManager : MonoBehaviour
         var fg = new GameObject("BarFg");
         fg.transform.SetParent(bg.transform, false);
         var fgRt = fg.AddComponent<RectTransform>();
-        fgRt.anchorMin = Vector2.zero;
-        fgRt.anchorMax = Vector2.one;
-        fgRt.offsetMin = new Vector2(2, 2);
-        fgRt.offsetMax = new Vector2(-2, -2);
+        fgRt.anchorMin = Vector2.zero; fgRt.anchorMax = Vector2.one;
+        fgRt.offsetMin = new Vector2(2, 2); fgRt.offsetMax = new Vector2(-2, -2);
         var fgImg = fg.AddComponent<Image>();
         fgImg.color = color;
         fgImg.sprite = uiSprite;

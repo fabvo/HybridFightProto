@@ -5,18 +5,21 @@
     <uses-permission android:name="android.permission.NFC" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
-    <!-- TCP networking between the two phones -->
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!--
+      Bluetooth: the API split changed in Android 12 (API 31).
+      - On Android <= 11 the install-time BLUETOOTH / BLUETOOTH_ADMIN are used.
+      - On Android >= 12 the runtime BLUETOOTH_CONNECT is used. We do NOT request
+        BLUETOOTH_SCAN because we restrict ourselves to already-paired devices --
+        no device discovery is performed by the app.
+      The maxSdkVersion attributes on the legacy permissions tell newer Android
+      to ignore them, which keeps app permission listings clean.
+    -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
 
     <application>
-        <!--
-          The theme and the meta-data android.app.lib_name="game" are the GameActivity
-          versions of these settings (Unity 6+). For the legacy UnityPlayerActivity
-          entry point use:
-              android:theme="@style/UnityThemeSelector"
-          and remove the android.app.lib_name meta-data.
-        -->
         <activity
             android:name="com.example.hybridfight.NfcUnityActivity"
             android:label="@string/app_name"
