@@ -1,0 +1,12 @@
+# ninja log v5
+63	653	7996168920855217	FramePacing/CMakeFiles/swappywrapper.dir/UnitySwappyWrapper.cpp.o	8073d92dd45e76ce
+656	950	7996168923435663	C:/Users/fabiv/Documents/GitHub/HybridFightProto/Library/Bee/Android/Prj/IL2CPP/Gradle/unityLibrary/build/intermediates/cxx/RelWithDebInfo/6cc4x393/obj/arm64-v8a/libswappywrapper.so	b3aef3dcd841511b
+35	2039	7996168934656159	GameActivity/CMakeFiles/game.dir/UGAInputKeyEvent.cpp.o	1486d233d5ebec70
+19	2072	7996168934931209	GameActivity/CMakeFiles/game.dir/UGAEntry.cpp.o	84b5887b43aa430e
+13	2092	7996168935201261	GameActivity/CMakeFiles/game.dir/UGAConfiguration.cpp.o	56bb965a52cb78bf
+44	2107	7996168935356279	GameActivity/CMakeFiles/game.dir/UGAInputMotionEvent.cpp.o	21560a5065cdc865
+1	2165	7996168935931384	GameActivity/CMakeFiles/game.dir/UGADebug.cpp.o	85f013326135130b
+53	2339	7996168937691684	GameActivity/CMakeFiles/game.dir/UGASoftKeyboard.cpp.o	b650ed1d2453d6f2
+26	2389	7996168938191772	GameActivity/CMakeFiles/game.dir/UGAInput.cpp.o	9ef492e12ec33161
+7	2500	7996168939286964	GameActivity/CMakeFiles/game.dir/UGAApplication.cpp.o	4bde246995e954d8
+2500	2616	7996168940473088	C:/Users/fabiv/Documents/GitHub/HybridFightProto/Library/Bee/Android/Prj/IL2CPP/Gradle/unityLibrary/build/intermediates/cxx/RelWithDebInfo/6cc4x393/obj/arm64-v8a/libgame.so	2b8c362aa0b7ce4d
