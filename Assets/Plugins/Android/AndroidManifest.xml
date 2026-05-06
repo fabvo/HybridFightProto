@@ -7,10 +7,10 @@
 
     <!--
       Bluetooth: the API split changed in Android 12 (API 31).
-      - On Android <= 11 the install-time BLUETOOTH / BLUETOOTH_ADMIN are used.
-      - On Android >= 12 the runtime BLUETOOTH_CONNECT is used. We do NOT request
-        BLUETOOTH_SCAN because we restrict ourselves to already-paired devices --
-        no device discovery is performed by the app.
+      - On Android up to 11, the install-time BLUETOOTH / BLUETOOTH_ADMIN are used.
+      - On Android 12 and newer, the runtime BLUETOOTH_CONNECT is used. We do NOT
+        request BLUETOOTH_SCAN because we restrict ourselves to already-paired
+        devices, no device discovery is performed by the app.
       The maxSdkVersion attributes on the legacy permissions tell newer Android
       to ignore them, which keeps app permission listings clean.
     -->
