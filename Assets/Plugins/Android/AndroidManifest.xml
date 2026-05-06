@@ -1,23 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
 
     <!-- NFC for the focus mechanic -->
     <uses-permission android:name="android.permission.NFC" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
     <!--
-      Bluetooth: the API split changed in Android 12 (API 31).
-      - On Android up to 11, the install-time BLUETOOTH / BLUETOOTH_ADMIN are used.
-      - On Android 12 and newer, the runtime BLUETOOTH_CONNECT is used. We do NOT
-        request BLUETOOTH_SCAN because we restrict ourselves to already-paired
-        devices, no device discovery is performed by the app.
-      The maxSdkVersion attributes on the legacy permissions tell newer Android
-      to ignore them, which keeps app permission listings clean.
+      Nearby Connections uses BT, BLE and Wi-Fi under the hood. We declare every
+      permission the API may ask for; the app requests the runtime ones at start.
+      The maxSdkVersion attributes tell newer Android to ignore legacy permissions
+      that have been replaced (e.g. ACCESS_FINE_LOCATION is no longer required for
+      BLE scan on Android 12+ when BLUETOOTH_SCAN has neverForLocation).
     -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+                     android:usesPermissionFlags="neverForLocation"
+                     tools:targetApi="s" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+                     android:usesPermissionFlags="neverForLocation"
+                     tools:targetApi="33" />
 
     <application>
         <activity

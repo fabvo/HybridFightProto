@@ -3,18 +3,12 @@ using System.Collections;
 using UnityEngine;
 
 /// <summary>
-/// Network + Solo orchestrator. Replaces the previous TCP-over-WLAN transport
-/// with Bluetooth Classic / RFCOMM. WLAN no longer needed -- works in guest
-/// networks, no IP entry, no shared SSID.
+/// Network + Solo orchestrator. Uses Google Nearby Connections instead of BT pairing
+/// or TCP-over-WLAN. Players just press one button on each phone and the API does
+/// the rest -- no IP, no pairing, no shared WiFi.
 ///
-/// Modes:
-///   Disconnected: nothing running.
-///   Solo:         no transport, an internal AI trainer plays the opponent.
-///   Bluetooth:    BluetoothManager (which talks to the Java bridge) handles
-///                 the byte-level transport. We just send/receive lines.
-///
-/// The line-based message format (ATK:N, HP:N, MODE:X) is the same as before
-/// so GameManager doesn't change.
+/// The line-based message format (ATK:N, HP:N, MODE:X) is unchanged so GameManager
+/// stays the same.
 /// </summary>
 public class NetworkController : MonoBehaviour
 {
@@ -28,8 +22,8 @@ public class NetworkController : MonoBehaviour
     public event Action<int> OnOpponentHpUpdated;
     public event Action<PlayerMode> OnOpponentModeChanged;
 
-    BluetoothManager bt;
-    GameManager      game;
+    NearbyConnectionsManager nearby;
+    GameManager              game;
 
     // Solo state
     int   soloAiHp;
@@ -38,15 +32,15 @@ public class NetworkController : MonoBehaviour
 
     void Start()
     {
-        game = GetComponent<GameManager>();
-        bt   = BluetoothManager.Instance;
+        game   = GetComponent<GameManager>();
+        nearby = NearbyConnectionsManager.Instance;
 
-        if (bt != null)
+        if (nearby != null)
         {
-            bt.OnConnected     += OnBluetoothConnected;
-            bt.OnDisconnected  += OnBluetoothDisconnected;
-            bt.OnMessage       += OnBluetoothMessage;
-            bt.OnStatusChanged += s => { if (!IsSolo) Status = s; };
+            nearby.OnConnected     += OnNearbyConnected;
+            nearby.OnDisconnected  += OnNearbyDisconnected;
+            nearby.OnMessage       += OnNearbyMessage;
+            nearby.OnStatusChanged += s => { if (!IsSolo) Status = s; };
         }
     }
 
@@ -69,16 +63,10 @@ public class NetworkController : MonoBehaviour
         OnOpponentHpUpdated?.Invoke(soloAiHp);
     }
 
-    public void StartBluetoothHost()
+    public void StartFindingPeer()
     {
-        if (IsConnected || bt == null) return;
-        bt.StartHost();
-    }
-
-    public void ConnectBluetooth(string deviceAddress)
-    {
-        if (IsConnected || bt == null) return;
-        bt.Connect(deviceAddress);
+        if (IsConnected || nearby == null) return;
+        nearby.StartFindingPeer();
     }
 
     public void Disconnect()
@@ -91,11 +79,11 @@ public class NetworkController : MonoBehaviour
             OnDisconnected?.Invoke();
             return;
         }
-        bt?.Disconnect();
+        nearby?.Stop();
     }
 
-    // ===================== Bluetooth callbacks =====================
-    void OnBluetoothConnected()
+    // ===================== Nearby callbacks =====================
+    void OnNearbyConnected()
     {
         IsSolo      = false;
         IsConnected = true;
@@ -103,14 +91,14 @@ public class NetworkController : MonoBehaviour
         OnConnected?.Invoke();
     }
 
-    void OnBluetoothDisconnected()
+    void OnNearbyDisconnected()
     {
         IsConnected = false;
         Status      = "Verbindung getrennt";
         OnDisconnected?.Invoke();
     }
 
-    void OnBluetoothMessage(string line)
+    void OnNearbyMessage(string line)
     {
         var parts = line.Split(':');
         switch (parts[0])
@@ -151,7 +139,7 @@ public class NetworkController : MonoBehaviour
         OnOpponentHpUpdated?.Invoke(soloAiHp);
     }
 
-    // ===================== Outbound messages (used by GameManager) =====================
+    // ===================== Outbound (used by GameManager) =====================
     public void SendAttack(int damage)
     {
         if (IsSolo)
@@ -165,18 +153,18 @@ public class NetworkController : MonoBehaviour
             }
             return;
         }
-        bt?.Send("ATK:" + damage);
+        nearby?.Send("ATK:" + damage);
     }
 
     public void SendHp(int hp)
     {
         if (IsSolo) return;
-        bt?.Send("HP:" + hp);
+        nearby?.Send("HP:" + hp);
     }
 
     public void SendMode(PlayerMode m)
     {
         if (IsSolo) return;
-        bt?.Send("MODE:" + m);
+        nearby?.Send("MODE:" + m);
     }
 }

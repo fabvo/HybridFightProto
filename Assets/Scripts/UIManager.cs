@@ -1,5 +1,4 @@
 using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
@@ -8,29 +7,30 @@ using UnityEngine.InputSystem.UI;
 #endif
 
 /// <summary>
-/// Builds the entire UI in code so you don't have to wire anything up in the Unity scene.
+/// Builds the entire UI in code. Three top-level panels (only one visible at a time):
+///   - Lobby:    SOLO TEST / MITSPIELER SUCHEN
+///   - Search:   "Suche Mitspieler..." + Abbrechen, while Nearby Connections looks for a peer
+///   - Game:     gameplay HUD with HP bars, mode, charge, swipe trail
 ///
-/// Three top-level panels (only one visible at a time):
-///   - Lobby:         Solo / BT Host / BT Verbinden / BT Pairing
-///   - Picker:        list of paired BT devices to choose for connecting
-///   - Game:          actual gameplay HUD with HP bars, mode, charge, swipe trail
+/// The Search panel is the major UX simplification over the previous Bluetooth flow:
+/// no device picker because Nearby Connections handles peer discovery and connection
+/// automatically.
 /// </summary>
 public class UIManager : MonoBehaviour
 {
     GameManager       game;
     NetworkController net;
-    BluetoothManager  bt;
+    NearbyConnectionsManager nearby;
     NfcManager        nfc;
     Canvas            canvas;
     RectTransform     canvasRect;
 
-    GameObject lobbyPanel, pickerPanel, gamePanel;
-    Text       lobbyStatusText, pickerStatusText, modeText, myHpText, oppHpText;
-    Text       gameOverText, hintText, soloBadge, nfcStatusText;
+    GameObject lobbyPanel, searchPanel, gamePanel;
+    Text       lobbyStatusText, searchStatusText, modeText, myHpText, oppHpText;
+    Text       gameOverText, hintText, soloBadge, nfcStatusText, searchSpinnerText;
     Image      myHpBar, oppHpBar, chargeBar;
     Image      nfcStatusBg, nfcFlash, attackFlash, swipeLine;
     Text       damagePopup;
-    Transform  pickerListContent;
 
     Sprite uiSprite;
     Color  chargeBarBaseColor   = new Color(1f, 0.85f, 0.20f);
@@ -38,10 +38,10 @@ public class UIManager : MonoBehaviour
 
     void Start()
     {
-        game = GetComponent<GameManager>();
-        net  = GetComponent<NetworkController>();
-        bt   = BluetoothManager.Instance;
-        nfc  = GameObject.Find("NfcManager").GetComponent<NfcManager>();
+        game   = GetComponent<GameManager>();
+        net    = GetComponent<NetworkController>();
+        nearby = NearbyConnectionsManager.Instance;
+        nfc    = GameObject.Find("NfcManager").GetComponent<NfcManager>();
 
         uiSprite = Sprite.Create(Texture2D.whiteTexture, new Rect(0, 0, 1, 1), new Vector2(0.5f, 0.5f));
 
@@ -68,8 +68,13 @@ public class UIManager : MonoBehaviour
     {
         if (lobbyPanel.activeSelf)
             lobbyStatusText.text = net.Status;
-        if (pickerPanel.activeSelf)
-            pickerStatusText.text = bt != null ? bt.Status : "";
+        if (searchPanel.activeSelf)
+        {
+            searchStatusText.text = nearby != null ? nearby.Status : "";
+            // Animated dots for the searching feedback.
+            int dots = (int)((Time.time * 2) % 4);
+            searchSpinnerText.text = "Suche Mitspieler" + new string('.', dots);
+        }
 
         UpdateNfcStatus();
         UpdateSwipeTrail();
@@ -80,22 +85,22 @@ public class UIManager : MonoBehaviour
     void ShowLobby()
     {
         lobbyPanel.SetActive(true);
-        pickerPanel.SetActive(false);
+        searchPanel.SetActive(false);
         gamePanel.SetActive(false);
     }
 
-    void ShowPicker()
+    void ShowSearch()
     {
         lobbyPanel.SetActive(false);
-        pickerPanel.SetActive(true);
+        searchPanel.SetActive(true);
         gamePanel.SetActive(false);
-        RefreshDeviceList();
+        net.StartFindingPeer();
     }
 
     void ShowGame()
     {
         lobbyPanel.SetActive(false);
-        pickerPanel.SetActive(false);
+        searchPanel.SetActive(false);
         gamePanel.SetActive(true);
     }
 
@@ -108,6 +113,12 @@ public class UIManager : MonoBehaviour
 
     void OnDisconnected()
     {
+        ShowLobby();
+    }
+
+    void CancelSearch()
+    {
+        net.Disconnect();
         ShowLobby();
     }
 
@@ -257,196 +268,58 @@ public class UIManager : MonoBehaviour
 #endif
 
         BuildLobby(canvasGo.transform);
-        BuildPicker(canvasGo.transform);
+        BuildSearch(canvasGo.transform);
         BuildGame(canvasGo.transform);
     }
 
-    // ----- Lobby -----
     void BuildLobby(Transform parent)
     {
         lobbyPanel = MakePanel("LobbyPanel", parent, new Color(0.08f, 0.10f, 0.16f));
 
-        var title = MakeText(lobbyPanel.transform, "HYBRID FIGHT", new Vector2(0, 760), 90);
+        var title = MakeText(lobbyPanel.transform, "HYBRID FIGHT", new Vector2(0, 700), 90);
         title.fontStyle = FontStyle.Bold;
         title.color = new Color(0.7f, 1f, 0.7f);
 
         MakeText(lobbyPanel.transform,
-            "Verbinde dich per Bluetooth mit dem Partner-Handy.\n"
-          + "Hinweis: Beide Handys muessen einmalig in den Android-Bluetooth-\n"
-          + "Einstellungen miteinander gekoppelt sein.",
-            new Vector2(0, 540), 28);
+            "Beide Spieler druecken einfach\n"
+          + "MITSPIELER SUCHEN.\n"
+          + "Die Handys finden sich automatisch -\n"
+          + "kein WLAN, keine Kopplung noetig.",
+            new Vector2(0, 400), 32);
 
-        MakeButton(lobbyPanel.transform, "SOLO TEST",     new Vector2(0,  280),
+        MakeButton(lobbyPanel.transform, "MITSPIELER SUCHEN", new Vector2(0,  100),
+            new Color(0.30f, 0.55f, 0.85f), ShowSearch);
+
+        MakeButton(lobbyPanel.transform, "SOLO TEST", new Vector2(0, -80),
             new Color(0.40f, 0.70f, 0.45f), () => net.StartSolo());
-
-        MakeButton(lobbyPanel.transform, "BT HOST",       new Vector2(0,  100),
-            new Color(0.85f, 0.45f, 0.30f), () => net.StartBluetoothHost());
-
-        MakeButton(lobbyPanel.transform, "BT VERBINDEN",  new Vector2(0,  -80),
-            new Color(0.30f, 0.55f, 0.85f), ShowPicker);
-
-        MakeButton(lobbyPanel.transform, "PAIRING-EINSTELLUNGEN", new Vector2(0, -240),
-            new Color(0.40f, 0.42f, 0.50f), () => bt?.OpenSettings());
 
         lobbyStatusText = MakeText(lobbyPanel.transform, "Nicht verbunden", new Vector2(0, -550), 30);
         lobbyStatusText.color = new Color(0.7f, 0.7f, 0.8f);
     }
 
-    // ----- Device picker -----
-    void BuildPicker(Transform parent)
+    void BuildSearch(Transform parent)
     {
-        pickerPanel = MakePanel("PickerPanel", parent, new Color(0.08f, 0.10f, 0.16f));
-        pickerPanel.SetActive(false);
+        searchPanel = MakePanel("SearchPanel", parent, new Color(0.08f, 0.10f, 0.16f));
+        searchPanel.SetActive(false);
 
-        var title = MakeText(pickerPanel.transform, "GERAET WAEHLEN", new Vector2(0, 800), 70);
-        title.fontStyle = FontStyle.Bold;
-        title.color = new Color(0.7f, 0.85f, 1f);
+        searchSpinnerText = MakeText(searchPanel.transform, "Suche Mitspieler...", new Vector2(0, 250), 60);
+        searchSpinnerText.fontStyle = FontStyle.Bold;
+        searchSpinnerText.color = new Color(0.7f, 0.85f, 1f);
 
-        MakeText(pickerPanel.transform,
-            "Tippe auf das Partner-Handy um zu verbinden.",
-            new Vector2(0, 700), 26);
+        MakeText(searchPanel.transform,
+            "Stelle sicher, dass das andere Handy ebenfalls\n"
+          + "MITSPIELER SUCHEN gedrueckt hat.\n\n"
+          + "Bluetooth und WLAN sollten an sein -\n"
+          + "ein gemeinsames Netzwerk ist nicht noetig.",
+            new Vector2(0, 0), 28);
 
-        // ScrollRect with vertical layout
-        var scrollGo = new GameObject("Scroll");
-        scrollGo.transform.SetParent(pickerPanel.transform, false);
-        var scrollRt = scrollGo.AddComponent<RectTransform>();
-        scrollRt.sizeDelta = new Vector2(900, 1100);
-        scrollRt.anchoredPosition = new Vector2(0, 50);
-        var scrollImg = scrollGo.AddComponent<Image>();
-        scrollImg.color = new Color(0.10f, 0.12f, 0.16f, 0.9f);
-        scrollImg.sprite = uiSprite;
-        scrollGo.AddComponent<RectMask2D>();
-        var scrollRect = scrollGo.AddComponent<ScrollRect>();
-        scrollRect.horizontal = false;
-        scrollRect.vertical   = true;
+        searchStatusText = MakeText(searchPanel.transform, "", new Vector2(0, -250), 28);
+        searchStatusText.color = new Color(0.85f, 0.85f, 0.6f);
 
-        var contentGo = new GameObject("Content");
-        contentGo.transform.SetParent(scrollGo.transform, false);
-        var contentRt = contentGo.AddComponent<RectTransform>();
-        contentRt.anchorMin = new Vector2(0, 1);
-        contentRt.anchorMax = new Vector2(1, 1);
-        contentRt.pivot     = new Vector2(0.5f, 1);
-        contentRt.anchoredPosition = Vector2.zero;
-        contentRt.sizeDelta = new Vector2(0, 0);
-
-        var vlg = contentGo.AddComponent<VerticalLayoutGroup>();
-        vlg.padding             = new RectOffset(20, 20, 20, 20);
-        vlg.spacing             = 15;
-        vlg.childForceExpandWidth = true;
-        vlg.childControlWidth   = true;
-        vlg.childForceExpandHeight = false;
-        vlg.childControlHeight  = false;
-        var fitter = contentGo.AddComponent<ContentSizeFitter>();
-        fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
-
-        scrollRect.content  = contentRt;
-        scrollRect.viewport = scrollRt;
-        pickerListContent   = contentGo.transform;
-
-        MakeButton(pickerPanel.transform, "AKTUALISIEREN", new Vector2(0, -640),
-            new Color(0.40f, 0.45f, 0.55f), RefreshDeviceList);
-        MakeButton(pickerPanel.transform, "PAIRING-EINSTELLUNGEN", new Vector2(0, -780),
-            new Color(0.40f, 0.45f, 0.55f), () => bt?.OpenSettings());
-        MakeButton(pickerPanel.transform, "ABBRECHEN", new Vector2(0, -920),
-            new Color(0.55f, 0.30f, 0.30f), ShowLobby);
-
-        pickerStatusText = MakeText(pickerPanel.transform, "", new Vector2(0, -1050), 26);
-        pickerStatusText.color = new Color(0.7f, 0.7f, 0.8f);
+        MakeButton(searchPanel.transform, "ABBRECHEN", new Vector2(0, -550),
+            new Color(0.55f, 0.30f, 0.30f), CancelSearch);
     }
 
-    void RefreshDeviceList()
-    {
-        if (pickerListContent == null) return;
-        for (int i = pickerListContent.childCount - 1; i >= 0; i--)
-            Destroy(pickerListContent.GetChild(i).gameObject);
-
-        if (bt == null)
-        {
-            AddPickerLabel("Bluetooth nicht verfuegbar.");
-            return;
-        }
-        if (!bt.IsSupported())
-        {
-            AddPickerLabel("Geraet hat kein Bluetooth.");
-            return;
-        }
-        if (!bt.HasConnectPermission())
-        {
-            AddPickerLabel("Bluetooth-Berechtigung fehlt.");
-            AddPickerActionButton("Berechtigung anfragen", () => bt.RequestPermission());
-            return;
-        }
-        if (!bt.IsEnabled())
-        {
-            AddPickerLabel("Bluetooth ist ausgeschaltet.");
-            AddPickerActionButton("Bluetooth einschalten", () => bt.RequestEnable());
-            return;
-        }
-
-        var devices = bt.GetPairedDevices();
-        if (devices.Count == 0)
-        {
-            AddPickerLabel("Keine gepaarten Geraete gefunden.\n"
-                         + "Koppele die Handys zuerst in den\n"
-                         + "Bluetooth-Einstellungen.");
-            return;
-        }
-
-        foreach (var d in devices)
-        {
-            string capturedAddr = d.Address;
-            string capturedName = d.Name;
-            AddPickerActionButton(capturedName + "\n" + capturedAddr,
-                () => OnDeviceSelected(capturedAddr, capturedName));
-        }
-    }
-
-    void OnDeviceSelected(string address, string name)
-    {
-        pickerStatusText.text = "Verbinde mit " + name + "...";
-        net.ConnectBluetooth(address);
-    }
-
-    void AddPickerLabel(string text)
-    {
-        var go = new GameObject("Label");
-        go.transform.SetParent(pickerListContent, false);
-        var rt = go.AddComponent<RectTransform>();
-        rt.sizeDelta = new Vector2(0, 200);
-        var t = go.AddComponent<Text>();
-        t.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-        t.fontSize = 32;
-        t.alignment = TextAnchor.MiddleCenter;
-        t.color = new Color(0.85f, 0.85f, 0.9f);
-        t.text = text;
-        t.horizontalOverflow = HorizontalWrapMode.Wrap;
-        var le = go.AddComponent<LayoutElement>();
-        le.preferredHeight = 200;
-    }
-
-    void AddPickerActionButton(string label, System.Action onClick)
-    {
-        var btnGo = new GameObject("Btn_" + label);
-        btnGo.transform.SetParent(pickerListContent, false);
-        var rt = btnGo.AddComponent<RectTransform>();
-        rt.sizeDelta = new Vector2(0, 130);
-        var img = btnGo.AddComponent<Image>();
-        img.color = new Color(0.30f, 0.55f, 0.85f);
-        img.sprite = uiSprite;
-        var btn = btnGo.AddComponent<Button>();
-        btn.targetGraphic = img;
-        btn.onClick.AddListener(() => onClick());
-        var le = btnGo.AddComponent<LayoutElement>();
-        le.preferredHeight = 130;
-
-        var lbl = MakeText(btnGo.transform, label, Vector2.zero, 32);
-        lbl.fontStyle = FontStyle.Bold;
-        var cg = lbl.gameObject.AddComponent<CanvasGroup>();
-        cg.blocksRaycasts = false;
-        cg.interactable = false;
-    }
-
-    // ----- Game HUD -----
     void BuildGame(Transform parent)
     {
         gamePanel = MakePanel("GamePanel", parent, new Color(0.05f, 0.06f, 0.10f));
@@ -587,7 +460,7 @@ public class UIManager : MonoBehaviour
         var go = new GameObject("Text");
         go.transform.SetParent(parent, false);
         var rt = go.AddComponent<RectTransform>();
-        rt.sizeDelta = new Vector2(1000, 140);
+        rt.sizeDelta = new Vector2(1000, 200);
         rt.anchoredPosition = pos;
         var t = go.AddComponent<Text>();
         t.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
@@ -605,7 +478,7 @@ public class UIManager : MonoBehaviour
         var go = new GameObject("Button_" + label);
         go.transform.SetParent(parent, false);
         var rt = go.AddComponent<RectTransform>();
-        rt.sizeDelta = new Vector2(560, 130);
+        rt.sizeDelta = new Vector2(720, 130);
         rt.anchoredPosition = pos;
         var img = go.AddComponent<Image>();
         img.color = color;
