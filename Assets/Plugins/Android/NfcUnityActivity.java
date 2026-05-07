@@ -1,8 +1,11 @@
 package com.example.hybridfight;
 
+import android.nfc.NdefMessage;
+import android.nfc.NdefRecord;
 import android.nfc.NfcAdapter;
 import android.nfc.Tag;
 import android.nfc.TagLostException;
+import android.nfc.tech.Ndef;
 import android.nfc.tech.NfcA;
 import android.os.Bundle;
 import android.util.Log;
@@ -14,23 +17,19 @@ import java.io.IOException;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Unity 6 GameActivity-compatible NFC bridge using ReaderMode + active presence polling.
+ * Unity 6 GameActivity NFC bridge with ReaderMode, active presence polling,
+ * AND NDEF text record reading.
  *
- * Why active polling and not just ReaderMode?
+ * Discovery flow:
+ *   1. ReaderMode fires onTagDiscovered (NDEF is pre-read by the system since
+ *      we do NOT set FLAG_READER_SKIP_NDEF_CHECK).
+ *   2. We extract the first TEXT record from the cached NDEF message, if any.
+ *   3. We send "uid|ndefPayload" to Unity on every heartbeat.
+ *   4. A worker thread opens NfcA and polls for presence via GET_VERSION (0x60).
  *
- *   ReaderMode's onTagDiscovered() fires ONCE when a tag enters the field. The OS does
- *   poll internally (EXTRA_READER_PRESENCE_CHECK_DELAY) but does NOT call our callback
- *   repeatedly. There is also no "tag removed" callback. The standard workaround is:
- *
- *     1. On discovery, open an NfcA connection in a worker thread.
- *     2. Loop: send a harmless transceive command (e.g. NTAG GET_VERSION 0x60).
- *        - Success -> tag is still in the field. Tell Unity.
- *        - TagLostException -> tag was lifted. Exit loop, tell Unity.
- *     3. Unity-side has a 0.6s freshness window that flips TagPresent back to false.
- *
- * C# entry points:
- *   UnityPlayer.UnitySendMessage("NfcManager", "OnNfcTagDiscovered", uidHex);
- *   UnityPlayer.UnitySendMessage("NfcManager", "OnNfcStatus",        statusMessage);
+ * Tag writing:
+ *   Use NFC Tools PRO -> Write -> Text -> type FOCUS / HEAL / SHIELD / BOMB.
+ *   Tags without any NDEF record default to FOCUS in the C# TagEffects parser.
  */
 public class NfcUnityActivity extends UnityPlayerGameActivity
         implements NfcAdapter.ReaderCallback {
@@ -39,8 +38,6 @@ public class NfcUnityActivity extends UnityPlayerGameActivity
     private static final int    PRESENCE_POLL_MS = 150;
 
     private NfcAdapter nfcAdapter;
-
-    /** Currently-active watcher thread, if any. */
     private final AtomicReference<Thread> watchThread = new AtomicReference<>();
 
     @Override
@@ -66,19 +63,20 @@ public class NfcUnityActivity extends UnityPlayerGameActivity
         super.onResume();
         if (nfcAdapter == null || !nfcAdapter.isEnabled()) return;
 
+        // No FLAG_READER_SKIP_NDEF_CHECK: let the system pre-read NDEF so we
+        // can use getCachedNdefMessage() without opening a separate connection.
         int flags = NfcAdapter.FLAG_READER_NFC_A
                   | NfcAdapter.FLAG_READER_NFC_B
                   | NfcAdapter.FLAG_READER_NFC_F
                   | NfcAdapter.FLAG_READER_NFC_V
                   | NfcAdapter.FLAG_READER_NFC_BARCODE
-                  | NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS
-                  | NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK;
+                  | NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS;
 
         Bundle extras = new Bundle();
         extras.putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 100);
 
         nfcAdapter.enableReaderMode(this, this, flags, extras);
-        Log.d(TAG, "ReaderMode enabled.");
+        Log.d(TAG, "ReaderMode enabled (with NDEF reading).");
     }
 
     @Override
@@ -93,13 +91,58 @@ public class NfcUnityActivity extends UnityPlayerGameActivity
     @Override
     public void onTagDiscovered(Tag tag) {
         if (tag == null) return;
-        // If a previous tag is still being watched, kill that thread first --
-        // either the player swapped tags or this is a re-detection.
         stopWatcher();
+
+        // Read NDEF text payload before starting the NfcA presence watcher.
+        String ndefPayload = readNdefText(tag);
+
         final Tag captured = tag;
-        Thread t = new Thread(() -> watchTag(captured), "NfcWatcher");
+        final String payload = ndefPayload;
+        Thread t = new Thread(() -> watchTag(captured, payload), "NfcWatcher");
         watchThread.set(t);
         t.start();
+    }
+
+    /**
+     * Extracts the first NDEF TEXT record as a String.
+     * Returns "" if the tag has no NDEF data or no text record.
+     */
+    private String readNdefText(Tag tag) {
+        Ndef ndef = Ndef.get(tag);
+        if (ndef == null) return "";
+
+        NdefMessage msg = ndef.getCachedNdefMessage();
+        if (msg == null) {
+            // Fallback: manually connect and read (some ReaderMode implementations
+            // don't always populate the cache).
+            try {
+                ndef.connect();
+                msg = ndef.getNdefMessage();
+            } catch (Exception e) {
+                Log.w(TAG, "NDEF manual read failed: " + e);
+            } finally {
+                try { ndef.close(); } catch (Exception ignored) {}
+            }
+        }
+        if (msg == null) return "";
+
+        for (NdefRecord rec : msg.getRecords()) {
+            if (rec.getTnf() == NdefRecord.TNF_WELL_KNOWN
+                    && java.util.Arrays.equals(rec.getType(), NdefRecord.RTD_TEXT)) {
+                try {
+                    byte[] payload = rec.getPayload();
+                    if (payload == null || payload.length < 2) continue;
+                    // Status byte: bit 7 = encoding (0=UTF-8, 1=UTF-16),
+                    //               bits 0..5 = language code length.
+                    int langLen = payload[0] & 0x3F;
+                    if (1 + langLen >= payload.length) continue;
+                    return new String(payload, 1 + langLen, payload.length - 1 - langLen, "UTF-8");
+                } catch (Exception e) {
+                    Log.w(TAG, "NDEF text decode failed: " + e);
+                }
+            }
+        }
+        return "";
     }
 
     private void stopWatcher() {
@@ -108,55 +151,38 @@ public class NfcUnityActivity extends UnityPlayerGameActivity
     }
 
     /**
-     * Worker thread. Holds an NfcA connection to the tag and pings it
-     * every PRESENCE_POLL_MS to detect when it's lifted.
+     * Worker thread: polls NfcA presence and sends heartbeats to Unity.
+     * Message format: "uid|ndefPayload" (pipe-separated).
      */
-    private void watchTag(Tag tag) {
+    private void watchTag(Tag tag, String ndefPayload) {
         String uid = uidToHex(tag.getId());
-        // Always send the initial discovery event so the C# side reacts ASAP
-        // even if we then fail to open a continuous connection.
-        sendTagToUnity(uid);
+        String message = uid + "|" + ndefPayload;
+        sendTagToUnity(message);
 
         NfcA nfcA = NfcA.get(tag);
         if (nfcA == null) {
-            Log.w(TAG, "Tag is not NfcA-compatible, no continuous presence tracking. UID=" + uid);
+            Log.w(TAG, "Tag is not NfcA-compatible, no presence tracking. UID=" + uid);
             return;
         }
 
         try {
             nfcA.connect();
-            Log.d(TAG, "NfcA connected, watching presence (UID=" + uid + ")");
+            Log.d(TAG, "NfcA connected, watching presence (UID=" + uid
+                    + ", NDEF=" + ndefPayload + ")");
 
             while (!Thread.currentThread().isInterrupted()) {
-                // Heartbeat: tell Unity the tag is still here.
-                sendTagToUnity(uid);
-
+                sendTagToUnity(message);
                 Thread.sleep(PRESENCE_POLL_MS);
 
-                if (!nfcA.isConnected()) {
-                    Log.d(TAG, "Connection no longer alive, ending watch.");
-                    break;
-                }
+                if (!nfcA.isConnected()) break;
 
                 try {
-                    // GET_VERSION (0x60). NTAG21x and Mifare Ultralight EV1 support this.
-                    // For other NfcA tags it might respond with an error -- that's fine,
-                    // an error reply still proves the tag is in the field. Only
-                    // TagLostException means the tag is physically gone.
                     nfcA.transceive(new byte[]{(byte) 0x60});
                 } catch (TagLostException e) {
-                    Log.d(TAG, "Tag was lifted (TagLostException). UID=" + uid);
+                    Log.d(TAG, "Tag lifted. UID=" + uid);
                     break;
                 } catch (IOException e) {
-                    // Tag responded with an error but is still in the field.
-                    // Verify by checking connection state.
-                    if (!nfcA.isConnected()) {
-                        Log.d(TAG, "Connection broken after IOException. UID=" + uid);
-                        break;
-                    }
-                    // else: tag responded "command not supported" but is still here.
-                    // Continue the loop, on next iteration we'll retry and the heartbeat
-                    // event has already been sent.
+                    if (!nfcA.isConnected()) break;
                 }
             }
         } catch (InterruptedException ie) {
@@ -165,12 +191,12 @@ public class NfcUnityActivity extends UnityPlayerGameActivity
             Log.w(TAG, "NfcA.connect() failed: " + e);
         } finally {
             try { nfcA.close(); } catch (Throwable ignored) {}
-            Log.d(TAG, "Watcher thread for UID=" + uid + " terminated.");
+            Log.d(TAG, "Watcher for UID=" + uid + " done.");
         }
     }
 
-    private void sendTagToUnity(String uid) {
-        UnityPlayer.UnitySendMessage("NfcManager", "OnNfcTagDiscovered", uid);
+    private void sendTagToUnity(String msg) {
+        UnityPlayer.UnitySendMessage("NfcManager", "OnNfcTagDiscovered", msg);
     }
 
     private void sendStatusToUnity(String status) {

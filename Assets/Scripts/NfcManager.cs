@@ -1,53 +1,58 @@
 using UnityEngine;
 
 /// <summary>
-/// Receives NFC tag detection messages from the Android Java plugin
-/// (NfcUnityActivity.java -> UnityPlayer.UnitySendMessage).
+/// Receives NFC messages from the Java plugin in the format "uid|ndefPayload".
+/// Derives TagPresent (via heartbeat freshness) and CurrentEffect (via TagEffects.Parse).
 ///
-/// This component MUST sit on a GameObject named exactly "NfcManager" because
-/// UnitySendMessage looks the receiver up by GameObject name.
-///
-/// With ReaderMode, the Java plugin fires OnNfcTagDiscovered roughly every
-/// 100-150 ms while a tag sits on the phone. We use that to derive
-/// <see cref="TagPresent"/>: true if a discovery event has happened within the
-/// last <see cref="PresenceWindow"/> seconds. When the player lifts the phone,
-/// no more events come in and TagPresent flips back to false after that window.
+/// MUST sit on a GameObject named "NfcManager" (UnitySendMessage routing).
 /// </summary>
 public class NfcManager : MonoBehaviour
 {
-    /// <summary>
-    /// How long after the last detection we still consider the tag "present".
-    /// Should be larger than the OS polling interval (~125 ms) plus some jitter.
-    /// 0.6 s is a good compromise -- responsive but not flickery.
-    /// </summary>
     public const float PresenceWindow = 0.6f;
 
-    public string LastTagId        { get; private set; }
-    public float  LastTagTime      { get; private set; } = -999f;
-    public int    TagsDetectedCount{ get; private set; }
-    public string LastError        { get; private set; }
+    public string    LastTagId         { get; private set; }
+    public string    LastNdefPayload   { get; private set; } = "";
+    public TagEffect CurrentEffect     { get; private set; } = TagEffect.Focus;
+    public float     LastTagTime       { get; private set; } = -999f;
+    public int       TagsDetectedCount { get; private set; }
+    public string    LastError         { get; private set; }
 
-    /// <summary>True while the tag is physically on the phone (within PresenceWindow seconds of last event).</summary>
-    public bool TagPresent => LastTagId != null && Time.time - LastTagTime < PresenceWindow;
-
+    public bool  TagPresent         => LastTagId != null && Time.time - LastTagTime < PresenceWindow;
     public float SecondsSinceLastTag => Time.time - LastTagTime;
 
     public event System.Action<string> OnTagDiscovered;
     public event System.Action<string> OnPluginError;
 
-    // -- Methods called from Java plugin via UnitySendMessage("NfcManager", ...) --
-
-    public void OnNfcTagDiscovered(string tagId)
+    /// <summary>Called from Java. Format: "UID_HEX|NDEF_TEXT" (pipe-separated).</summary>
+    public void OnNfcTagDiscovered(string message)
     {
+        // Parse uid|payload
+        string uid;
+        string payload;
+        int pipe = message.IndexOf('|');
+        if (pipe >= 0)
+        {
+            uid     = message.Substring(0, pipe);
+            payload = message.Substring(pipe + 1);
+        }
+        else
+        {
+            uid     = message;
+            payload = "";
+        }
+
         bool isFirstThisSession = LastTagId == null || !TagPresent;
-        LastTagId   = tagId;
-        LastTagTime = Time.time;
+        LastTagId       = uid;
+        LastNdefPayload = payload;
+        CurrentEffect   = TagEffects.Parse(payload);
+        LastTagTime     = Time.time;
+
         if (isFirstThisSession)
         {
             TagsDetectedCount++;
-            Debug.Log($"[NFC] Tag #{TagsDetectedCount} placed: {tagId}");
+            Debug.Log($"[NFC] Tag #{TagsDetectedCount} placed: {uid}, NDEF=\"{payload}\", Effect={CurrentEffect}");
         }
-        OnTagDiscovered?.Invoke(tagId);
+        OnTagDiscovered?.Invoke(uid);
     }
 
     public void OnNfcStatus(string statusMessage)

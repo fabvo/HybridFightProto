@@ -1,7 +1,5 @@
 using System.Collections;
 using UnityEngine;
-// Only pull in the InputSystem namespace when we'll actually compile against it.
-// In "Both" mode the legacy path is taken; the using would cause TouchPhase ambiguity.
 #if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
 using UnityEngine.InputSystem;
 #endif
@@ -9,16 +7,16 @@ using UnityEngine.InputSystem;
 public enum PlayerMode { Idle, Blocking, AttackReady, Focusing }
 
 /// <summary>
-/// Core game logic. Combines TiltDetector + NfcManager into a PlayerMode, handles charging,
-/// detects the swipe-to-attack gesture, applies damage, and syncs HP with the opponent.
+/// Core game logic. All tag effects (Focus, Heal, Shield, Bomb) are applied in
+/// a single UpdateTagEffects() method that works identically in Solo and Multiplayer.
+/// NetworkController.SendAttack/SendHp already handle both modes internally, so
+/// GameManager never branches on IsSolo.
 ///
-/// Focus mode is now driven by NfcManager.TagPresent, which (thanks to ReaderMode in the
-/// Java plugin) reflects the actual physical presence of the tag in real time. As soon
-/// as the player lifts the phone off the card, the focus mode terminates within ~0.6s.
-///
-/// Exposed for UI feedback:
-///   - SwipeActive / SwipeStart / SwipeCurrent
-///   - OnAttackFired(damage)
+/// Tag effects:
+///   Focus  (default): charges next attack while on card
+///   Heal:             restores HP over time while on card
+///   Shield:           incoming damage = 0 while on card
+///   Bomb:             fires instant damage to opponent on first contact
 /// </summary>
 public class GameManager : MonoBehaviour
 {
@@ -32,7 +30,7 @@ public class GameManager : MonoBehaviour
     public const float ChargePerSecond    = 18f;
     const   float SwipePixelThreshold     = 150f;
     const   float AttackCooldown          = 0.6f;
-    const   float SoloRespawnSeconds      = 2f;
+    public const float SoloRespawnSeconds = 2f;
 
     public int  MyHp       { get; private set; } = MaxHp;
     public int  OpponentHp { get; private set; } = MaxHp;
@@ -56,6 +54,7 @@ public class GameManager : MonoBehaviour
 
     float lastAttackTime;
     bool  soloRespawningPlayer;
+    bool  bombFiredThisPlacement;    // prevents Bomb from firing every frame
 
     void Start()
     {
@@ -77,23 +76,14 @@ public class GameManager : MonoBehaviour
     {
         if (!net.IsConnected || GameOver) return;
         UpdateMode();
-        UpdateCharge();
+        UpdateTagEffects();
         DetectSwipe();
     }
 
+    // ===================== Mode resolution =====================
+    // Priority: Block > Focus (any tag present) > AttackReady > Idle
     void UpdateMode()
     {
-        // Mode resolution priority:
-        //   1. Block (deliberate defense gesture)               -- always wins
-        //   2. Focus (NFC tag actively in field)                -- overrides AttackReady
-        //   3. AttackReady (phone flat with screen up)
-        //   4. Idle
-        //
-        // Why does Focus override AttackReady? The NFC antenna sits on the BACK of the
-        // phone. Putting the phone "on" a focus card therefore means screen-up with the
-        // back touching the card -- which is the same tilt as AttackReady. Tag presence
-        // is the disambiguating signal: if the tag is being read, the player is clearly
-        // engaging the card and not preparing to swipe.
         PlayerMode next;
         if (tilt.State == TiltState.Block)
             next = PlayerMode.Blocking;
@@ -112,6 +102,44 @@ public class GameManager : MonoBehaviour
         }
     }
 
+    // ===================== Tag effects (central, mode-agnostic) =====================
+    // This is the SINGLE place where all NFC tag effects are applied.
+    // It uses net.SendAttack / net.SendHp which handle Solo + Multiplayer internally.
+    void UpdateTagEffects()
+    {
+        if (!nfc.TagPresent)
+        {
+            bombFiredThisPlacement = false;
+            return;
+        }
+
+        switch (nfc.CurrentEffect)
+        {
+            case TagEffect.Focus:
+                UpdateCharge();
+                break;
+
+            case TagEffect.Heal:
+                int prevHp = MyHp;
+                MyHp = Mathf.Min(MaxHp, MyHp + Mathf.RoundToInt(TagEffects.HealHpPerSecond * Time.deltaTime));
+                if (MyHp != prevHp) { OnHpChanged?.Invoke(); net.SendHp(MyHp); }
+                break;
+
+            case TagEffect.Shield:
+                // Passive: damage reduction is handled in HandleIncomingAttack.
+                break;
+
+            case TagEffect.Bomb:
+                if (!bombFiredThisPlacement)
+                {
+                    bombFiredThisPlacement = true;
+                    net.SendAttack(TagEffects.BombDamage);
+                    OnAttackFired?.Invoke(TagEffects.BombDamage);
+                }
+                break;
+        }
+    }
+
     void UpdateCharge()
     {
         if (Mode != PlayerMode.Focusing) return;
@@ -120,6 +148,7 @@ public class GameManager : MonoBehaviour
         if (Charge != prev) OnChargeChanged?.Invoke();
     }
 
+    // ===================== Swipe-to-attack =====================
     void DetectSwipe()
     {
         if (Mode == PlayerMode.Focusing) { SwipeActive = false; return; }
@@ -199,11 +228,19 @@ public class GameManager : MonoBehaviour
         OnAttackFired?.Invoke(damage);
     }
 
+    // ===================== Damage taken =====================
     void HandleIncomingAttack(int incoming)
     {
         if (soloRespawningPlayer) return;
 
-        int actual = Mode == PlayerMode.Blocking ? BlockedDamageTaken : incoming;
+        int actual;
+        if (Mode == PlayerMode.Blocking)
+            actual = BlockedDamageTaken;
+        else if (nfc.TagPresent && nfc.CurrentEffect == TagEffect.Shield)
+            actual = 0;    // Shield card absorbs ALL damage while on it
+        else
+            actual = incoming;
+
         MyHp = Mathf.Max(0, MyHp - actual);
         OnHpChanged?.Invoke();
         net.SendHp(MyHp);
@@ -241,6 +278,7 @@ public class GameManager : MonoBehaviour
         MyHp = OpponentHp = MaxHp;
         Charge = 0;
         GameOver = false;
+        bombFiredThisPlacement = false;
         OnHpChanged?.Invoke();
         OnChargeChanged?.Invoke();
     }

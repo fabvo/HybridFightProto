@@ -7,14 +7,13 @@ using UnityEngine.InputSystem.UI;
 #endif
 
 /// <summary>
-/// Builds the entire UI in code. Three top-level panels (only one visible at a time):
-///   - Lobby:    SOLO TEST / MITSPIELER SUCHEN
-///   - Search:   "Suche Mitspieler..." + Abbrechen, while Nearby Connections looks for a peer
-///   - Game:     gameplay HUD with HP bars, mode, charge, swipe trail
+/// Full UI built in code. Three panels: Lobby, Search, Game.
 ///
-/// The Search panel is the major UX simplification over the previous Bluetooth flow:
-/// no device picker because Nearby Connections handles peer discovery and connection
-/// automatically.
+/// Tag effect display uses TagEffects.DisplayName/Description/Color exclusively,
+/// so adding a new effect only requires editing TagEffects.cs.
+///
+/// Back buttons: Game panel has ZURUECK (disconnects + returns to lobby),
+/// Search panel already has ABBRECHEN.
 /// </summary>
 public class UIManager : MonoBehaviour
 {
@@ -71,7 +70,6 @@ public class UIManager : MonoBehaviour
         if (searchPanel.activeSelf)
         {
             searchStatusText.text = nearby != null ? nearby.Status : "";
-            // Animated dots for the searching feedback.
             int dots = (int)((Time.time * 2) % 4);
             searchSpinnerText.text = "Suche Mitspieler" + new string('.', dots);
         }
@@ -102,6 +100,7 @@ public class UIManager : MonoBehaviour
         lobbyPanel.SetActive(false);
         searchPanel.SetActive(false);
         gamePanel.SetActive(true);
+        gameOverText.gameObject.SetActive(false);
     }
 
     void OnConnected()
@@ -111,38 +110,36 @@ public class UIManager : MonoBehaviour
         ShowGame();
     }
 
-    void OnDisconnected()
-    {
-        ShowLobby();
-    }
+    void OnDisconnected() => ShowLobby();
 
-    void CancelSearch()
-    {
-        net.Disconnect();
-        ShowLobby();
-    }
+    void CancelSearch()   { net.Disconnect(); ShowLobby(); }
 
-    // ===================== NFC status =====================
+    void LeaveGame()      { net.Disconnect(); }
+
+    // ===================== NFC status (reads TagEffects for display) =====================
     void UpdateNfcStatus()
     {
         if (nfc == null || nfcStatusText == null) return;
 
         if (nfc.LastTagId == null)
         {
-            nfcStatusText.text = "NFC: noch kein Tag erkannt";
+            nfcStatusText.text = "kein Tag";
             nfcStatusBg .color = new Color(0.45f, 0.18f, 0.18f, 1f);
         }
         else if (nfc.TagPresent)
         {
+            // Show effect name + color from TagEffects (single source of truth)
+            TagEffect fx = nfc.CurrentEffect;
             float pulse = 0.5f + 0.5f * Mathf.Sin(Time.time * 5f);
-            nfcStatusText.text = $"TAG LIEGT DRAUF  UID:{nfc.LastTagId}";
-            nfcStatusBg .color = Color.Lerp(new Color(0.18f, 0.55f, 0.22f, 1f),
-                                            new Color(0.30f, 0.80f, 0.35f, 1f), pulse);
+            nfcStatusText.text = $"{TagEffects.DisplayName(fx)}  UID:{nfc.LastTagId}";
+            Color baseCol = TagEffects.Color(fx);
+            Color bright  = Color.Lerp(baseCol, Color.white, 0.3f);
+            nfcStatusBg.color = Color.Lerp(baseCol * 0.7f, bright, pulse);
         }
         else
         {
             float since = nfc.SecondsSinceLastTag;
-            nfcStatusText.text = $"letzter Tag #{nfc.TagsDetectedCount}  UID:{nfc.LastTagId}  vor {since:0.0}s";
+            nfcStatusText.text = $"#{nfc.TagsDetectedCount} {TagEffects.DisplayName(nfc.CurrentEffect)}  vor {since:0.0}s";
             nfcStatusBg .color = new Color(0.30f, 0.32f, 0.36f, 1f);
         }
     }
@@ -153,7 +150,9 @@ public class UIManager : MonoBehaviour
         if (lastSeenContactCount != nfc.TagsDetectedCount)
         {
             lastSeenContactCount = nfc.TagsDetectedCount;
-            StartCoroutine(FlashOverlay(nfcFlash, new Color(1f, 0.85f, 0.25f, 0.65f), 0.45f));
+            Color flashCol = TagEffects.Color(nfc.CurrentEffect);
+            flashCol.a = 0.65f;
+            StartCoroutine(FlashOverlay(nfcFlash, flashCol, 0.45f));
         }
     }
 
@@ -283,14 +282,19 @@ public class UIManager : MonoBehaviour
         MakeText(lobbyPanel.transform,
             "Beide Spieler druecken einfach\n"
           + "MITSPIELER SUCHEN.\n"
-          + "Die Handys finden sich automatisch -\n"
-          + "kein WLAN, keine Kopplung noetig.",
-            new Vector2(0, 400), 32);
+          + "Die Handys finden sich automatisch.",
+            new Vector2(0, 440), 30);
 
-        MakeButton(lobbyPanel.transform, "MITSPIELER SUCHEN", new Vector2(0,  100),
+        MakeText(lobbyPanel.transform,
+            "NFC-Karten mit Effekten beschreiben:\n"
+          + "NFC Tools PRO -> Schreiben -> Text ->\n"
+          + "FOCUS / HEAL / SHIELD / BOMB",
+            new Vector2(0, 230), 26);
+
+        MakeButton(lobbyPanel.transform, "MITSPIELER SUCHEN", new Vector2(0, 30),
             new Color(0.30f, 0.55f, 0.85f), ShowSearch);
 
-        MakeButton(lobbyPanel.transform, "SOLO TEST", new Vector2(0, -80),
+        MakeButton(lobbyPanel.transform, "SOLO TEST", new Vector2(0, -150),
             new Color(0.40f, 0.70f, 0.45f), () => net.StartSolo());
 
         lobbyStatusText = MakeText(lobbyPanel.transform, "Nicht verbunden", new Vector2(0, -550), 30);
@@ -309,14 +313,13 @@ public class UIManager : MonoBehaviour
         MakeText(searchPanel.transform,
             "Stelle sicher, dass das andere Handy ebenfalls\n"
           + "MITSPIELER SUCHEN gedrueckt hat.\n\n"
-          + "Bluetooth und WLAN sollten an sein -\n"
-          + "ein gemeinsames Netzwerk ist nicht noetig.",
+          + "Bluetooth und WLAN sollten an sein.",
             new Vector2(0, 0), 28);
 
         searchStatusText = MakeText(searchPanel.transform, "", new Vector2(0, -250), 28);
         searchStatusText.color = new Color(0.85f, 0.85f, 0.6f);
 
-        MakeButton(searchPanel.transform, "ABBRECHEN", new Vector2(0, -550),
+        MakeButton(searchPanel.transform, "ZURUECK", new Vector2(0, -550),
             new Color(0.55f, 0.30f, 0.30f), CancelSearch);
     }
 
@@ -328,37 +331,43 @@ public class UIManager : MonoBehaviour
         oppHpText = MakeText(gamePanel.transform, "Gegner: 100", new Vector2(0, 850), 40);
         oppHpBar  = MakeBar (gamePanel.transform, new Vector2(0, 780), new Color(0.9f, 0.3f, 0.3f), 800f, 35f);
 
-        soloBadge = MakeText(gamePanel.transform, "[ SOLO TEST ]", new Vector2(0, 700), 28);
+        soloBadge = MakeText(gamePanel.transform, "[ SOLO TEST ]", new Vector2(0, 710), 28);
         soloBadge.color = new Color(0.55f, 0.85f, 0.55f);
         soloBadge.gameObject.SetActive(false);
 
+        // NFC status badge
         var nfcGo = new GameObject("NfcStatus");
         nfcGo.transform.SetParent(gamePanel.transform, false);
         var nfcRt = nfcGo.AddComponent<RectTransform>();
         nfcRt.sizeDelta = new Vector2(960, 70);
-        nfcRt.anchoredPosition = new Vector2(0, 600);
+        nfcRt.anchoredPosition = new Vector2(0, 610);
         nfcStatusBg = nfcGo.AddComponent<Image>();
         nfcStatusBg.sprite = uiSprite;
         nfcStatusBg.color = new Color(0.45f, 0.18f, 0.18f, 1f);
-        nfcStatusText = MakeText(nfcGo.transform, "NFC: noch kein Tag erkannt", Vector2.zero, 28);
+        nfcStatusText = MakeText(nfcGo.transform, "kein Tag", Vector2.zero, 28);
         nfcStatusText.color = new Color(1f, 1f, 1f, 0.95f);
 
-        modeText = MakeText(gamePanel.transform, "-", new Vector2(0, 100), 90);
+        modeText = MakeText(gamePanel.transform, "-", new Vector2(0, 200), 90);
         modeText.fontStyle = FontStyle.Bold;
 
-        hintText = MakeText(gamePanel.transform, "", new Vector2(0, -50), 32);
+        hintText = MakeText(gamePanel.transform, "", new Vector2(0, 50), 30);
         hintText.color = new Color(0.7f, 0.7f, 0.8f);
 
-        MakeText(gamePanel.transform, "AUFLADUNG", new Vector2(0, -550), 32);
-        chargeBar = MakeBar(gamePanel.transform, new Vector2(0, -620), chargeBarBaseColor, 800f, 35f);
+        MakeText(gamePanel.transform, "AUFLADUNG", new Vector2(0, -450), 32);
+        chargeBar = MakeBar(gamePanel.transform, new Vector2(0, -510), chargeBarBaseColor, 800f, 35f);
 
-        myHpText = MakeText(gamePanel.transform, "Du: 100", new Vector2(0, -760), 40);
-        myHpBar  = MakeBar (gamePanel.transform, new Vector2(0, -830), new Color(0.3f, 0.85f, 0.4f), 800f, 35f);
+        myHpText = MakeText(gamePanel.transform, "Du: 100", new Vector2(0, -640), 40);
+        myHpBar  = MakeBar (gamePanel.transform, new Vector2(0, -710), new Color(0.3f, 0.85f, 0.4f), 800f, 35f);
 
-        gameOverText = MakeText(gamePanel.transform, "", new Vector2(0, 350), 110);
+        // Back button
+        MakeButton(gamePanel.transform, "ZURUECK", new Vector2(0, -880),
+            new Color(0.45f, 0.30f, 0.30f), LeaveGame);
+
+        gameOverText = MakeText(gamePanel.transform, "", new Vector2(0, 420), 110);
         gameOverText.fontStyle = FontStyle.Bold;
         gameOverText.gameObject.SetActive(false);
 
+        // Overlays
         var slGo = new GameObject("SwipeLine");
         slGo.transform.SetParent(gamePanel.transform, false);
         var slRt = slGo.AddComponent<RectTransform>();
@@ -371,7 +380,7 @@ public class UIManager : MonoBehaviour
         swipeLine.raycastTarget = false;
         slGo.SetActive(false);
 
-        damagePopup = MakeText(gamePanel.transform, "", new Vector2(0, 100), 84);
+        damagePopup = MakeText(gamePanel.transform, "", new Vector2(0, 200), 84);
         damagePopup.fontStyle = FontStyle.Bold;
         damagePopup.color = new Color(1f, 0.55f, 0.2f, 1f);
         damagePopup.gameObject.SetActive(false);
@@ -413,7 +422,7 @@ public class UIManager : MonoBehaviour
             case PlayerMode.Blocking:
                 modeText.text  = "BLOCK";
                 modeText.color = new Color(0.4f, 0.7f, 1f);
-                hintText.text  = "Halte das Handy aufrecht – du blockst.";
+                hintText.text  = "Halte das Handy aufrecht - du blockst.";
                 break;
             case PlayerMode.AttackReady:
                 modeText.text  = "ANGRIFF";
@@ -421,14 +430,16 @@ public class UIManager : MonoBehaviour
                 hintText.text  = "Wische ueber den Bildschirm um anzugreifen!";
                 break;
             case PlayerMode.Focusing:
-                modeText.text  = "FOKUS";
-                modeText.color = new Color(1f, 0.9f, 0.3f);
-                hintText.text  = "Lade auf... (nicht abheben!)";
+                // Display effect name + description from TagEffects (single source of truth)
+                TagEffect fx = nfc != null && nfc.TagPresent ? nfc.CurrentEffect : TagEffect.Focus;
+                modeText.text  = TagEffects.DisplayName(fx);
+                modeText.color = TagEffects.Color(fx);
+                hintText.text  = TagEffects.Description(fx);
                 break;
             default:
                 modeText.text  = "BEREIT";
                 modeText.color = new Color(0.6f, 0.6f, 0.7f);
-                hintText.text  = "Aufrecht = Block · Flach hoch = Angriff · Auf NFC-Karte = Fokus";
+                hintText.text  = "Aufrecht = Block  |  Flach = Angriff  |  NFC-Karte = Effekt";
                 break;
         }
     }
